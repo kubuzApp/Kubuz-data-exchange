@@ -12,7 +12,10 @@ pub mod writer;
 
 /// Write `view` as one STEP file named `name`. One part at the origin
 /// becomes a plain part; anything else becomes an assembly whose children
-/// carry the part ids.
+/// carry the part ids. A part's `material` goes into its product's
+/// description and a MATERIAL_DESIGNATION; its `color` becomes a
+/// STYLED_ITEM on the solid. Parts that share a solid but not a colour get
+/// the solid written once per colour.
 pub fn write_step(view: &View, name: &str) -> Result<String, String> {
     if view.units != "mm" {
         return Err(format!("view units are {}, only mm is written", view.units));
@@ -57,13 +60,6 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
         }
     }
 
-    // The B-rep of every solid, once.
-    let mut breps: HashMap<&str, usize> = HashMap::new();
-    for s in &solids {
-        let brep = solid_brep(&mut w, s)?;
-        breps.insert(s.id.as_str(), brep);
-    }
-
     let parts: Vec<view::Part> = if parts.is_empty() {
         view.solids
             .iter()
@@ -72,6 +68,7 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
                 solid: s.id.clone(),
                 material: String::new(),
                 thickness: 0.0,
+                color: None,
                 position: [0.0; 3],
                 rotation: [0.0; 3],
                 matrix: None,
@@ -80,26 +77,42 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
     } else {
         parts
     };
+
+    // The B-rep of every solid, once per colour it is shown in: a style
+    // hangs on the solid, so two colours need two solids.
+    let mut breps: HashMap<(&str, String), usize> = HashMap::new();
     for p in &parts {
-        if !breps.contains_key(p.solid.as_str()) {
+        let Some(s) = solids.iter().find(|s| s.id == p.solid) else {
             return Err(format!("part {} points at unknown solid {}", p.id, p.solid));
+        };
+        let rgb = p.rgb()?;
+        let key = (p.solid.as_str(), colour_key(rgb));
+        if let std::collections::hash_map::Entry::Vacant(e) = breps.entry(key) {
+            let brep = solid_brep(&mut w, s)?;
+            if let Some(rgb) = rgb {
+                style(&mut w, &ctx, brep, rgb);
+            }
+            e.insert(brep);
         }
     }
+    let brep_of = |p: &view::Part| breps[&(p.solid.as_str(), colour_key(p.rgb().ok().flatten()))];
 
     let single = parts.len() == 1 && is_identity(&parts[0]);
     if single {
         let p = &parts[0];
-        let product = Product::new(&mut w, &ctx, &p.id, Some(breps[p.solid.as_str()]));
+        let product = Product::new(&mut w, &ctx, &p.id, &p.material, Some(brep_of(p)));
         let _ = product;
         return Ok(w.finish(name));
     }
 
-    // One product per solid, named by the first part that uses it.
-    let mut products: HashMap<&str, Product> = HashMap::new();
+    // One product per solid, material and colour, named by the first part
+    // that uses it.
+    let mut products: HashMap<(&str, &str, String), Product> = HashMap::new();
     for p in &parts {
-        if !products.contains_key(p.solid.as_str()) {
-            let prod = Product::new(&mut w, &ctx, &p.id, Some(breps[p.solid.as_str()]));
-            products.insert(p.solid.as_str(), prod);
+        let key = (p.solid.as_str(), p.material.as_str(), colour_key(p.rgb()?));
+        if let std::collections::hash_map::Entry::Vacant(e) = products.entry(key) {
+            let prod = Product::new(&mut w, &ctx, &p.id, &p.material, Some(brep_of(p)));
+            e.insert(prod);
         }
     }
 
@@ -121,9 +134,9 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
         join(&items),
         ctx.geom
     ));
-    let root = Product::with_rep(&mut w, &ctx, name, root_rep);
+    let root = Product::with_rep(&mut w, &ctx, name, "", root_rep);
     for (i, p) in parts.iter().enumerate() {
-        let child = &products[p.solid.as_str()];
+        let child = &products[&(p.solid.as_str(), p.material.as_str(), colour_key(p.rgb()?))];
         let nauo = w.add(format!(
             "NEXT_ASSEMBLY_USAGE_OCCURRENCE('{id}','{id}','',#{},#{},$)",
             root.definition,
@@ -152,6 +165,36 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
 pub fn write_step_json(view_json: &str, name: &str) -> Result<String, String> {
     let view: View = serde_json::from_str(view_json).map_err(|e| format!("view: {e}"))?;
     write_step(&view, name)
+}
+
+/// A colour as a map key: the hex the view gave, or empty for none.
+fn colour_key(rgb: Option<[f64; 3]>) -> String {
+    match rgb {
+        Some(c) => format!("{:.4},{:.4},{:.4}", c[0], c[1], c[2]),
+        None => String::new(),
+    }
+}
+
+/// Colour `brep` on both sides: the STYLED_ITEM chain OpenCascade and
+/// Inventor read, in a presentation representation on the same context.
+fn style(w: &mut StepWriter, ctx: &Context, brep: usize, rgb: [f64; 3]) {
+    let colour = w.add(format!(
+        "COLOUR_RGB('',{},{},{})",
+        writer::f(rgb[0]),
+        writer::f(rgb[1]),
+        writer::f(rgb[2])
+    ));
+    let fill_colour = w.add(format!("FILL_AREA_STYLE_COLOUR('',#{colour})"));
+    let fill = w.add(format!("FILL_AREA_STYLE('',(#{fill_colour}))"));
+    let surface_fill = w.add(format!("SURFACE_STYLE_FILL_AREA(#{fill})"));
+    let side = w.add(format!("SURFACE_SIDE_STYLE('',(#{surface_fill}))"));
+    let usage = w.add(format!("SURFACE_STYLE_USAGE(.BOTH.,#{side})"));
+    let psa = w.add(format!("PRESENTATION_STYLE_ASSIGNMENT((#{usage}))"));
+    let item = w.add(format!("STYLED_ITEM('',(#{psa}),#{brep})"));
+    w.add(format!(
+        "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',(#{item}),#{})",
+        ctx.geom
+    ));
 }
 
 fn is_identity(p: &view::Part) -> bool {
@@ -204,7 +247,13 @@ struct Product {
 }
 
 impl Product {
-    fn new(w: &mut StepWriter, ctx: &Context, name: &str, brep: Option<usize>) -> Self {
+    fn new(
+        w: &mut StepWriter,
+        ctx: &Context,
+        name: &str,
+        material: &str,
+        brep: Option<usize>,
+    ) -> Self {
         let origin = w.axis([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
         let rep = match brep {
             Some(b) => w.add(format!(
@@ -218,13 +267,16 @@ impl Product {
                 ctx.geom
             )),
         };
-        Self::with_rep(w, ctx, name, rep)
+        Self::with_rep(w, ctx, name, material, rep)
     }
 
-    fn with_rep(w: &mut StepWriter, ctx: &Context, name: &str, rep: usize) -> Self {
+    /// `material` is the product's description and, when given, a
+    /// MATERIAL_DESIGNATION on its definition.
+    fn with_rep(w: &mut StepWriter, ctx: &Context, name: &str, material: &str, rep: usize) -> Self {
         let name = quote(name);
         let prod = w.add(format!(
-            "PRODUCT('{name}','{name}','',(#{}))",
+            "PRODUCT('{name}','{name}','{}',(#{}))",
+            quote(material),
             ctx.product_ctx
         ));
         w.add(format!(
@@ -237,6 +289,12 @@ impl Product {
         ));
         let pds = w.add(format!("PRODUCT_DEFINITION_SHAPE('','',#{definition})"));
         w.add(format!("SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})"));
+        if !material.is_empty() {
+            w.add(format!(
+                "MATERIAL_DESIGNATION('{}',(#{definition}))",
+                quote(material)
+            ));
+        }
         let _ = ctx.app;
         Self { definition, rep }
     }
@@ -448,6 +506,35 @@ mod tests {
         let text = write_step_json(json, "cube").unwrap();
         assert_eq!(text.matches("ADVANCED_FACE(").count(), 6);
         each_edge_twice_each_way(&text).unwrap();
+    }
+
+    /// A part's material is its product's description and a material
+    /// designation; its colour a style on the solid. Two colours on one
+    /// solid are two solids in the file; a bad colour is an error.
+    #[test]
+    fn materials_and_colours_are_written() {
+        let mut v: serde_json::Value = serde_json::from_str(FIXTURES[5].1).unwrap();
+        v["parts"][0]["color"] = "#1e90ff".into();
+        v["parts"][0]["material"] = "304".into();
+        // The second part shows the first part's solid in another colour.
+        v["parts"][1]["solid"] = "solid-0".into();
+        v["parts"][1]["color"] = "#FFD700".into();
+        v["parts"][1]["material"] = "316".into();
+        v["parts"][2]["material"] = "304".into();
+        let text = write_step_json(&v.to_string(), "deck").unwrap();
+        assert!(text.contains("MATERIAL_DESIGNATION('304'"), "{text}");
+        assert!(text.contains("MATERIAL_DESIGNATION('316'"));
+        assert!(text.contains("PRODUCT('Deck','Deck','304'"), "{text}");
+        assert!(
+            text.contains("COLOUR_RGB('',0.117647059,0.564705882,1.0)"),
+            "{text}"
+        );
+        assert_eq!(text.matches("MANIFOLD_SOLID_BREP(").count(), 3);
+        assert_eq!(text.matches("STYLED_ITEM(").count(), 2);
+        assert_eq!(text.matches("NEXT_ASSEMBLY_USAGE_OCCURRENCE").count(), 3);
+        each_edge_twice_each_way(&text).unwrap();
+        v["parts"][0]["color"] = "blue".into();
+        assert!(write_step_json(&v.to_string(), "deck").is_err());
     }
 
     #[test]

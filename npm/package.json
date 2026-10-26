@@ -1,6 +1,6 @@
 {
   "name": "@kubuzapp/data-exchange",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "File formats (STEP AP214) from the Kubuz kernel's exact-geometry view, as WebAssembly",
   "type": "module",
   "license": "MIT",
