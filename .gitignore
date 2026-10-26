@@ -1,0 +1,7 @@
+/target
+/npm/node_modules
+/npm/dist
+/npm/wasm
+/judge/.venv
+*.step
+!fixtures/*.step

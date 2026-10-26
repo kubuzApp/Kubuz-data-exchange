@@ -1,0 +1,35 @@
+{
+  "name": "@kubuzapp/data-exchange",
+  "version": "0.1.0",
+  "description": "File formats (STEP AP214) from the Kubuz kernel's exact-geometry view, as WebAssembly",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:kubuzApp/Kubuz-data-exchange",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./kubuz_data_exchange.js": "./wasm/kubuz_data_exchange.js",
+    "./kubuz_data_exchange_bg.wasm": "./wasm/kubuz_data_exchange_bg.wasm"
+  },
+  "files": [
+    "dist",
+    "wasm",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build .. --target web --out-dir npm/wasm --release -- --features wasm && node ./scripts/clean-wasm-out.mjs",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:wasm && npm run build:ts",
+    "smoke": "node ./scripts/smoke.mjs",
+    "prepack": "node ./scripts/prepack-check.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo test
+
+  # The fixtures are views the kernel wrote for gallery parts. Each one is
+  # written to STEP and read back by OpenCascade (cadquery-ocp): one closed
+  # valid solid per part, and no edge tolerance above 1e-3 mm.
+  judge:
+    name: OpenCascade judge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install cadquery-ocp==8.0.1
+      - run: cargo build --release --example view2step
+      - name: Write and judge every fixture
+        run: |
+          mkdir -p out
+          for v in fixtures/*.view.json; do
+            n=$(basename "$v" .view.json)
+            target/release/examples/view2step "$v" "out/$n.step" "$n"
+          done
+          python -I judge/judge.py out/*.step
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: "https://npm.pkg.github.com"
+      - run: npm install --global wasm-pack@0.13.1
+      - run: npm install --no-audit --no-fund
+        working-directory: npm
+      - run: npm run build
+        working-directory: npm
+      - run: npm run smoke
+        working-directory: npm
+      - run: npm pack
+        working-directory: npm
+      - name: Publish to GitHub Packages
+        if: github.event_name == 'release'
+        run: npm publish
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
