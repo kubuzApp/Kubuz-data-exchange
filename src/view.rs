@@ -140,6 +140,10 @@ pub struct Part {
     pub material: String,
     #[serde(default)]
     pub thickness: f64,
+    /// Display colour as `#rrggbb` (the kernel never writes one; an app
+    /// adds it from its material library). Written as a STYLED_ITEM.
+    #[serde(default)]
+    pub color: Option<String>,
     #[serde(default)]
     pub position: P3,
     /// Degrees, R = Rx · Ry · Rz. Used only when `matrix` is missing.
@@ -162,6 +166,25 @@ pub enum Pose {
 }
 
 impl Part {
+    /// The colour as red, green and blue in 0..1, or `None` when there is
+    /// none. A string that is not `#rrggbb` is an error, not a wrong colour.
+    pub fn rgb(&self) -> Result<Option<[f64; 3]>, String> {
+        let Some(c) = &self.color else {
+            return Ok(None);
+        };
+        let hex = c.trim().trim_start_matches('#');
+        let bad = || format!("part {}: colour {c:?} is not #rrggbb", self.id);
+        if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(bad());
+        }
+        let ch = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| bad());
+        Ok(Some([
+            f64::from(ch(0)?) / 255.0,
+            f64::from(ch(2)?) / 255.0,
+            f64::from(ch(4)?) / 255.0,
+        ]))
+    }
+
     /// Classify [`Part::rows`].
     pub fn pose(&self) -> Pose {
         let m = self.rows();

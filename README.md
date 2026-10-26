@@ -84,6 +84,7 @@ One JSON document. Units are millimetres.
     }]
   }],
   "parts": [{"id": "Apron", "solid": "solid-0", "material": "304", "thickness": 1.5,
+             "color": "#b0b0b8",
              "position": [x, y, z], "rotation": [rx, ry, rz],
              "matrix": [[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]]}]
 }
@@ -102,6 +103,13 @@ Rules the kernel keeps and the writer relies on:
 - identical parts share one solid;
 - world point = `matrix` · local point + `position`. `rotation` is the same
   pose in degrees, R = Rx · Ry · Rz, and is used only when `matrix` is absent.
+
+A part's `material` becomes its product's description and a
+`MATERIAL_DESIGNATION`. `color` (`#rrggbb`, which the kernel never writes;
+an app adds it from its material library) becomes a `STYLED_ITEM` on the
+solid, so Inventor and OpenCascade show the part in that colour. Parts that
+share a solid share one product and one `MANIFOLD_SOLID_BREP` per colour,
+so a cabinet of twelve equal plates is one model with twelve occurrences.
 
 The Rust types are in [`src/view.rs`](src/view.rs). A field is renamed only
 with a matching change in the kernel. The fixtures `mesh_*.view.json` and
