@@ -29,15 +29,35 @@ fn mm() -> String {
     "mm".into()
 }
 
-#[derive(Clone, Debug, Deserialize)]
+/// A solid is either the kernel's B-rep (vertices, curves, edges, surfaces,
+/// faces) or, for geometry that was only ever a mesh, a closed triangle
+/// `mesh`. The writer turns a mesh into planar faces first
+/// ([`crate::mesh::mesh_to_brep`]).
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Solid {
     pub id: String,
+    #[serde(default)]
     pub vertices: Vec<P3>,
+    #[serde(default)]
     pub curves: Vec<Curve>,
+    #[serde(default)]
     pub edges: Vec<Edge>,
+    #[serde(default)]
     pub surfaces: Vec<Surface>,
+    #[serde(default)]
     pub faces: Vec<Face>,
+    #[serde(default)]
+    pub mesh: Option<Mesh>,
+}
+
+/// A closed triangle mesh in millimetres: `triangles` index `vertices`,
+/// counter-clockwise seen from outside. Vertices may be duplicated; the
+/// writer welds them.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Mesh {
+    pub vertices: Vec<P3>,
+    pub triangles: Vec<[usize; 3]>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -107,6 +127,10 @@ pub struct LoopEdge {
 }
 
 /// One placed part. World point = `matrix` · local point + `position`.
+///
+/// `matrix` is normally a rotation. It may also be a reflection or carry a
+/// uniform scale: such a part gets its own baked solid in the file instead of
+/// a placement ([`crate::step::bake`]).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Part {
@@ -124,6 +148,55 @@ pub struct Part {
     /// R row by row.
     #[serde(default)]
     pub matrix: Option<[P3; 3]>,
+}
+
+/// What a part's matrix is, once the rotation part is taken out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pose {
+    /// A proper rotation: the part is placed, not copied.
+    Rotation,
+    /// `scale` × an orthogonal matrix with determinant `det` (±1).
+    Similar { scale: f64, det: f64 },
+    /// Shear or non-uniform scale: not something a solid survives.
+    Other,
+}
+
+impl Part {
+    /// Classify [`Part::rows`].
+    pub fn pose(&self) -> Pose {
+        let m = self.rows();
+        let col = |j: usize| [m[0][j], m[1][j], m[2][j]];
+        let dot = |a: P3, b: P3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let lens = [0, 1, 2].map(|j| dot(col(j), col(j)).sqrt());
+        let scale = lens[0];
+        if scale < 1e-12 {
+            return Pose::Other;
+        }
+        let tol = 1e-9 * scale;
+        if (lens[1] - scale).abs() > tol || (lens[2] - scale).abs() > tol {
+            return Pose::Other;
+        }
+        for (i, j) in [(0, 1), (1, 2), (0, 2)] {
+            if dot(col(i), col(j)).abs() > tol * scale {
+                return Pose::Other;
+            }
+        }
+        let det = det3(m) / (scale * scale * scale);
+        if (scale - 1.0).abs() <= 1e-9 && det > 0.0 {
+            Pose::Rotation
+        } else {
+            Pose::Similar {
+                scale,
+                det: det.signum(),
+            }
+        }
+    }
+}
+
+pub fn det3(m: [P3; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
 }
 
 impl Part {

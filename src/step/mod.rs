@@ -3,9 +3,11 @@
 
 use std::collections::HashMap;
 
-use crate::view::{self, Curve, Solid, Surface, View};
+use crate::mesh::mesh_to_brep;
+use crate::view::{self, Curve, Pose, Solid, Surface, View};
 use writer::{any_perp, join, quote, sub, unit, StepWriter};
 
+pub mod bake;
 pub mod writer;
 
 /// Write `view` as one STEP file named `name`. One part at the origin
@@ -21,14 +23,48 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
     let mut w = StepWriter::default();
     let ctx = Context::new(&mut w);
 
+    // Mesh solids become planar B-reps; a part whose pose is a mirror image
+    // or a scale gets its own solid with the pose baked in.
+    let mut solids: Vec<Solid> = Vec::with_capacity(view.solids.len());
+    for s in &view.solids {
+        solids.push(match &s.mesh {
+            Some(mesh) => mesh_to_brep(&s.id, mesh)?,
+            None => s.clone(),
+        });
+    }
+    let mut parts: Vec<view::Part> = view.parts.clone();
+    for p in &mut parts {
+        match p.pose() {
+            Pose::Rotation => {}
+            Pose::Similar { scale, det: _ } => {
+                let Some(src) = solids.iter().find(|s| s.id == p.solid) else {
+                    return Err(format!("part {} points at unknown solid {}", p.id, p.solid));
+                };
+                let id = format!("{}@{}", src.id, p.id);
+                let baked = bake::bake(src, &id, p.rows(), p.position, scale);
+                solids.push(baked);
+                p.solid = id;
+                p.position = [0.0; 3];
+                p.rotation = [0.0; 3];
+                p.matrix = None;
+            }
+            Pose::Other => {
+                return Err(format!(
+                    "part {}: matrix must be a rotation, a mirror image or a uniform scale",
+                    p.id
+                ));
+            }
+        }
+    }
+
     // The B-rep of every solid, once.
     let mut breps: HashMap<&str, usize> = HashMap::new();
-    for s in &view.solids {
+    for s in &solids {
         let brep = solid_brep(&mut w, s)?;
         breps.insert(s.id.as_str(), brep);
     }
 
-    let parts: Vec<view::Part> = if view.parts.is_empty() {
+    let parts: Vec<view::Part> = if parts.is_empty() {
         view.solids
             .iter()
             .map(|s| view::Part {
@@ -42,7 +78,7 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
             })
             .collect()
     } else {
-        view.parts.clone()
+        parts
     };
     for p in &parts {
         if !breps.contains_key(p.solid.as_str()) {
@@ -388,6 +424,30 @@ mod tests {
         assert!(write_step_json(r#"{"units":"in","solids":[],"parts":[]}"#, "x").is_err());
         let dangling = r#"{"units":"mm","solids":[{"id":"s","vertices":[],"curves":[],"edges":[],"surfaces":[],"faces":[{"surface":0,"sameSense":true,"loops":[[{"edge":0,"forward":true}]]}]}],"parts":[]}"#;
         assert!(write_step_json(dangling, "x").is_err());
+    }
+
+    #[test]
+    fn a_mirrored_part_is_baked_not_placed() {
+        let mut v: serde_json::Value = serde_json::from_str(FIXTURES[1].1).unwrap();
+        v["parts"][0]["matrix"] = serde_json::json!([[-1, 0, 0], [0, 1, 0], [0, 0, 1]]);
+        v["parts"][0]["position"] = serde_json::json!([5, 0, 0]);
+        let text = write_step_json(&v.to_string(), "mirror").unwrap();
+        assert!(
+            !text.contains("NEXT_ASSEMBLY_USAGE_OCCURRENCE"),
+            "one part at the origin"
+        );
+        each_edge_twice_each_way(&text).unwrap();
+        let shear = serde_json::json!([[1, 0.5, 0], [0, 1, 0], [0, 0, 1]]);
+        v["parts"][0]["matrix"] = shear;
+        assert!(write_step_json(&v.to_string(), "shear").is_err());
+    }
+
+    #[test]
+    fn a_mesh_solid_is_written_as_planar_faces() {
+        let json = include_str!("../../fixtures/mesh_cube.view.json");
+        let text = write_step_json(json, "cube").unwrap();
+        assert_eq!(text.matches("ADVANCED_FACE(").count(), 6);
+        each_edge_twice_each_way(&text).unwrap();
     }
 
     #[test]

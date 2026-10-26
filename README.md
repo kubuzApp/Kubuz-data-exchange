@@ -44,6 +44,17 @@ assembly named `name`, with one `NEXT_ASSEMBLY_USAGE_OCCURRENCE` per part,
 carrying the part's id, placed by its pose. Identical parts share one
 product, as they share one solid in the view.
 
+Two things the kernel never writes, but an app may add to a view:
+
+- a **mesh solid**, `{"id": "Cube", "mesh": {"vertices": [[x, y, z]],
+  "triangles": [[a, b, c]]}}`, for geometry that only ever was a mesh (a
+  glTF model, an OpenSCAD part). Coplanar neighbouring triangles merge into
+  one planar face with its holes; vertices are welded at 1e-5 mm.
+- a part `matrix` that is a **mirror image or a uniform scale**. STEP
+  placements are rigid, so such a part gets its own solid with the pose
+  baked in (loops reversed, circles turned round, ruled faces flipped).
+  Shear and non-uniform scale are refused.
+
 ## The view
 
 One JSON document. Units are millimetres.
@@ -93,7 +104,8 @@ Rules the kernel keeps and the writer relies on:
   pose in degrees, R = Rx · Ry · Rz, and is used only when `matrix` is absent.
 
 The Rust types are in [`src/view.rs`](src/view.rs). A field is renamed only
-with a matching change in the kernel.
+with a matching change in the kernel. The fixtures `mesh_*.view.json` and
+`four_down_mirrored.view.json` cover the two additions above.
 
 ## The judge
 
