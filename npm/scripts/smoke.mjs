@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const wasmDir = join(root, "wasm");
-const { default: init, exportDxf, exportStep } = await import(
+const { default: init, exportDrawings, exportDxf, exportStep } = await import(
   pathToFileURL(join(wasmDir, "kubuz_data_exchange.js")).href
 );
 await init({ module_or_path: await readFile(join(wasmDir, "kubuz_data_exchange_bg.wasm")) });
@@ -38,4 +38,14 @@ if (!dxf.files[0].dxf.startsWith("0\nSECTION\n") || bends < 8 || dxf.files[0].qu
   console.error(`unexpected dxf: ${bends} bend entities`);
   process.exit(1);
 }
-console.log(`ok: deck_splash, ${result.step.length} bytes, ${parts} parts; four_down_flat, ${dxf.files[0].dxf.length} bytes of DXF`);
+const drawings = JSON.parse(exportDrawings(flat, JSON.stringify({ date: "2026-10-28", title: "Smoke" })));
+if (!drawings.ok || drawings.sheets.length !== 1 || !drawings.pdf.startsWith("JVBERi0xLjc")) {
+  console.error(`unexpected drawings result: ${JSON.stringify(drawings).slice(0, 200)}`);
+  process.exit(1);
+}
+const pdfBytes = Buffer.from(drawings.pdf, "base64");
+if (pdfBytes.length > 40_000 || drawings.sheets[0].dimensions.length < 8 || drawings.sheets[0].bends.length !== 8) {
+  console.error(`unexpected dossier: ${pdfBytes.length} bytes, ${drawings.sheets[0].dimensions.length} dimensions`);
+  process.exit(1);
+}
+console.log(`ok: deck_splash, ${result.step.length} bytes, ${parts} parts; four_down_flat, ${dxf.files[0].dxf.length} bytes of DXF, ${pdfBytes.length} bytes of PDF`);
