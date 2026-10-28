@@ -934,7 +934,7 @@ fn place_chain(
     stations.sort_by(|a, b| a.t.total_cmp(&b.t));
     stations.dedup_by(|a, b| {
         if (a.t - b.t).abs() <= SAME {
-            let extra: Vec<String> = a.sources.drain(..).collect();
+            let extra: Vec<String> = std::mem::take(&mut a.sources);
             for src in extra {
                 if !b.sources.contains(&src) {
                     b.sources.push(src);
