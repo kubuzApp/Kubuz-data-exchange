@@ -111,11 +111,14 @@ const flat = await exactGeometry(programJson, undefined, false);
 if (flat.ok) {
   const dossier = await exportDrawings(flat.view, {
     owner: "Kubuz",
+    address: ["Bosbeek 56 - 9120 Beveren-Waas", "www.kubuz.net"],
     createdBy: "Kubuz CPQ",
     date: "2026-10-28",
+    customer: "Ateliers Dupont",
     title: "Worktable",
     number: "KB-2026-0412",
     language: "nl",
+    densities: { S235: 7850, "AISI 304": 8000 },
     logo: { width: 120, height: 40, paths: [{ d: "M0 0H120V40H0Z", fill: "#003366" }] },
   });
   if (dossier.ok) saveAs("worktable-drawings.pdf", dossier.pdfBytes());
@@ -124,28 +127,42 @@ if (flat.ok) {
 
 Every distinct blank gets a sheet (parts that share a blank share a sheet;
 `quantity` says how many to make), on A4 portrait or A3 landscape, at the
-largest ISO 5455 scale that fits. The sheet follows ISO 5457 (frame,
-centring and trimming marks, the A3 grid reference), the title block ISO
-7200 (180 mm: owner or logo, title, identification number, made by, approved
-by, date, material, thickness, quantity, document type, status, revision,
-scale, sheet, format, general tolerances, projection symbol, blank size),
-the lines ISO 128-2 (0,5 outline, 0,25 the rest), the lettering ISO 3098
-(osifont, embedded as a subset), the dimensions ISO 129-1 running dimensions
-from the lower-left corner of the blank, so the operator reads every
-position straight off the sheet.
+largest ISO 5455 scale that fits; the title block is the same size on both.
+The sheet follows ISO 5457 (frame, centring and trimming marks, the grid
+reference `1 2 3 4 …` and `A B C …` around the frame), the title block the
+Kubuz template on ISO 7200 (designer, design date, approved, approved date,
+scale, size, projection symbol, material, thickness, weight, folded extents,
+the part's number and description, the customer, the owner's name and
+address, the ownership line), the lines ISO 128-2 (0,5 outline, 0,25 the
+rest), the lettering ISO 3098 (osifont, embedded as a subset) and the
+dimension style of the Inventor template (text 3 mm, arrows 3 × 0,75,
+extension lines 1 mm past the dimension line, decimal comma, one decimal).
 
-What the drafter puts on the sheet, and the exporter does too:
+The flat pattern is the main drawing, as a press-brake operator reads it,
+and the exporter puts on it what the drafter does:
 
-- **running dimensions** on both axes for every corner of the outline, the
-  sharp corner a fillet replaced, every hole centre and every bend line;
-  values closer than 3,6 mm on paper take a further row of labels;
+- **chain dimensions** below and left of the blank, edge to bend line to
+  bend line to edge, which are the back-gauge settings of the press brake,
+  then the outline's corners (the sharp corner a fillet replaced), then the
+  overall size underneath; the holes get their own chain from the opposite
+  edge, above or right. An oblique bend gets one short dimension across its
+  flange, from the bend line to the parallel edge. Every value stands on
+  its line when it fits, else beyond the end, above a neighbouring gap with
+  a leader, or outside the line: never on a line or another text;
+- **section views** of the folded part for every bend: a cut across the
+  flanges, drawn as the sheet's thickness band with the inside and outside
+  radii, the flanges dimensioned parallel to the flange (outside lengths,
+  interrupted when long), the bend angle between them when it is not 90°,
+  and the width and height. The section is marked on the flat pattern by
+  one arrow with its letter, no cutting line; the view is titled
+  `DOORSNEDE A-A` (with its scale when it differs);
 - **callouts** `⌀d` and `R` next to the feature when the paper around it
-  is free (never over a line or another text), else in a column at the
-  right; equal sizes are counted, `4× ⌀9`;
-- **numbered bend lines** with a table of angle (deviation from flat), direction
-  (`OP` towards the viewer, `NEER` away: the view is the outer skin), inside
-  radius and bend allowance; the V-opening is the press-brake operator's
-  choice and is not written;
+  is free, else in a column at the right; equal sizes are counted, `4× ⌀9`;
+- **numbered bend lines** with a table at the bottom of the sheet, aligned
+  with the notes: angle (deviation from flat), direction (`OP` towards the
+  viewer, `NEER` away: the view is the outer skin), inside radius and bend
+  allowance; the V-opening is the press-brake operator's choice and is not
+  written;
 - **reliefs, notches and small rounds** on the outline are not dimensioned
   (the laser cuts them from the DXF) and the notes say so; a cutout is a
   feature at any size;
@@ -179,9 +196,10 @@ small: about 20 KB for the font and 1 to 3 KB a sheet, fully vector.
 
 Besides the file the export describes every sheet (`sheets`): its kind
 (`flat` or `folded`), paper, scale, where the blank sits, material, every
-dimension with the features it came from and, for a folded sheet, each
-view's frame and origin in part coordinates, so an outside judge can rebuild
-the part from the drawing alone. Parts that cannot be drawn (a mesh, a
+chain with its stations and the features that put them there, every section
+with its cut and the pieces it shows, the folded extents, and, for a folded
+sheet, each view's frame and origin in part coordinates, so an outside judge
+can rebuild the part from the drawing alone. Parts that cannot be drawn (a mesh, a
 mirrored folded part) are listed under `skipped`.
 
 From the command line:
@@ -291,12 +309,17 @@ python -I judge/judge_dxf.py out/*.dxf
 The drawings have the strictest judge: [`judge/judge_pdf.py`](judge/judge_pdf.py)
 reads each dossier back with PyMuPDF and pikepdf, and the flat patterns it
 drew with its own DXF reader, and checks that every page is an ISO sheet,
-every font is embedded, every dimension the export claims is printed, every
-printed ordinate is a coordinate of the blank (or the theoretical corner
-past a relief), every hole centre, bend-line end and blank extent is
-dimensioned, every hole size has its callout, every bend its numbered tag,
-no two texts overlap, no line runs through a text, the file stays under
-24 KB plus 4 KB a page, and veraPDF passes it as PDF/A-2b. A folded sheet
+every font is embedded, every chain the export claims is printed with its
+values equal to the gaps between its stations, every station is a corner
+of the blank (or the theoretical corner past a relief), a hole centre or a
+bend line, every chain runs from edge to edge, every hole centre, bend line
+and blank extent is dimensioned, every hole size has its callout, every bend
+its numbered tag and its row in the table, every section's flange lengths
+and angles match the DXF cut (outside length = flat length plus the bend
+allowance of the thickness band), the folded extents match the folded
+fixture, no two texts overlap (measured with the embedded font's advances),
+no line runs through a text, the file stays under 25 KB plus 4 KB a page,
+and veraPDF passes it as PDF/A-2b. A folded sheet
 is judged against the view it was drawn from (`--views`): every ordinate
 is, in its view's frame, a vertex, a hole centre, a circle's extreme, a
 cylinder's silhouette or the corner of two edge-on faces; every chain runs

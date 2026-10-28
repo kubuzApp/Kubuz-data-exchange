@@ -38,6 +38,8 @@ pub enum Seg {
 #[derive(Clone, Debug)]
 pub struct BendLine {
     pub id: String,
+    /// The bend zone's id on the skin.
+    pub zone_id: String,
     pub angle_deg: f64,
     pub direction: BendDirection,
     pub inside_radius: f64,
@@ -48,12 +50,21 @@ pub struct BendLine {
     pub b: P2,
 }
 
+/// One zone of the outer skin (a flange or a bend zone), as the polygon
+/// of its outer loop, sampled.
+#[derive(Clone, Debug, Default)]
+pub struct Zone {
+    pub id: String,
+    pub points: Vec<P2>,
+}
+
 /// A flat pattern: closed loops of segments (the outline and the holes,
-/// all cut) and the bend lines.
+/// all cut), the bend lines, and the zones the kernel cut the skin into.
 #[derive(Clone, Debug, Default)]
 pub struct Blank {
     pub loops: Vec<Vec<Seg>>,
     pub bends: Vec<BendLine>,
+    pub zones: Vec<Zone>,
     pub min: P2,
     pub max: P2,
 }
@@ -168,9 +179,52 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
         loops,
         ..Blank::default()
     };
+    // The zones: each outer-skin face's outer loop, sampled on the blank.
+    for &fi in &outer {
+        let f = &solid.faces[fi];
+        let Some(lp) = f.loops.first() else {
+            continue;
+        };
+        let mut points = Vec::new();
+        for le in lp {
+            let seg = segment(solid, le.edge, le.forward, &to2, n, mirror, scale)?;
+            match seg {
+                Seg::Line { a, .. } => points.push(a),
+                Seg::Arc { c, r, start, end } => {
+                    let sweep = (end - start).rem_euclid(360.0);
+                    let k = ((sweep / 15.0).ceil() as usize).max(1);
+                    let (first, last) = {
+                        let a = to2(solid.vertices[if le.forward {
+                            solid.edges[le.edge].start
+                        } else {
+                            solid.edges[le.edge].end
+                        }]);
+                        let ccw = (angle_deg(c, a) - start).rem_euclid(360.0) < 1e-6;
+                        if ccw {
+                            (start, start + sweep)
+                        } else {
+                            (end, end - sweep)
+                        }
+                    };
+                    for i in 0..k {
+                        let t = first + (last - first) * i as f64 / k as f64;
+                        points.push(arc_point(c, r, t));
+                    }
+                }
+                Seg::Circle { .. } => {}
+            }
+        }
+        if points.len() >= 3 {
+            blank.zones.push(Zone {
+                id: f.zone_id.clone(),
+                points,
+            });
+        }
+    }
     for b in &solid.bends {
         blank.bends.push(BendLine {
             id: b.id.clone(),
+            zone_id: b.zone_id.clone(),
             angle_deg: b.angle_deg,
             direction: b.direction,
             inside_radius: b.inside_radius * scale,
@@ -302,6 +356,11 @@ impl Blank {
         for b in &mut self.bends {
             mv(&mut b.a);
             mv(&mut b.b);
+        }
+        for z in &mut self.zones {
+            for p in &mut z.points {
+                mv(p);
+            }
         }
         self.min = [0.0, 0.0];
         self.max = [hi[0] - lo[0], hi[1] - lo[1]];

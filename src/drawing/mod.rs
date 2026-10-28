@@ -25,6 +25,8 @@ pub mod flat;
 pub mod folded;
 pub mod logo;
 pub mod project;
+pub mod running;
+pub mod section;
 pub mod sheet;
 pub mod text;
 
@@ -43,6 +45,14 @@ pub struct Meta {
     pub approved_by: String,
     /// `YYYY-MM-DD`.
     pub date: String,
+    pub approved_date: String,
+    /// The customer named in the title block.
+    pub customer: String,
+    /// The owner's address lines under its name in the title block.
+    pub address: Vec<String>,
+    /// Density in kg/m³ by material name, for the weight in the title
+    /// block.
+    pub densities: HashMap<String, f64>,
     /// The dossier's title (the configuration or order).
     pub title: String,
     /// Drawing number prefix; each sheet is `<number>-<position>`.
@@ -63,6 +73,10 @@ impl Default for Meta {
             created_by: "Kubuz CPQ".into(),
             approved_by: String::new(),
             date: "2026-01-01".into(),
+            approved_date: String::new(),
+            customer: String::new(),
+            address: Vec::new(),
+            densities: HashMap::new(),
             title: String::new(),
             number: String::new(),
             revision: "-".into(),
@@ -242,7 +256,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     });
     for paper in sheet::Paper::ALL {
         let (w, h) = paper.size();
-        let form = sheet::frame_form(paper, lang, meta.logo.as_ref(), &meta.owner)?;
+        let form = sheet::frame_form(paper, lang, meta.logo.as_ref(), &meta.owner, &meta.address)?;
         doc.add_form(paper.form_name(), w, h, form);
     }
     let total = groups.len();

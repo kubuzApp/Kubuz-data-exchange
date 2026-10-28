@@ -11,14 +11,26 @@ its own reader, and never trusts the report for a fact it can check:
 * every font is embedded, the file carries an output intent and a
   language, and veraPDF passes it as PDF/A-2b when a jar is given;
 * every dimension the report claims is printed on the page as it says;
-* every printed ordinate is a coordinate of the DXF, or the corner two
-  long cut lines make past a relief (no invented numbers);
-* every hole centre, bend-line end and blank extent in the DXF is
-  dimensioned;
+* every chain of dimensions runs from one edge of the metal to the other
+  (a chain across an oblique bend from one edge to the bend line), every
+  station of it is a coordinate of the DXF (a cut, a bend line, a hole
+  centre, or the corner two long cut lines make past a relief), and
+  every value is the gap between two stations (no invented numbers);
+* every bend line, hole centre and blank extent is a station of a chain
+  in its direction;
 * every hole diameter has a callout counting the holes of that size;
-* every bend line has a numbered tag;
+* every bend line has a numbered tag, and its note when the report
+  claims one;
+* every section cuts the blank where the report says: its flat pieces are
+  the DXF's distances between the bend zones along the cut, its flange
+  lengths are those pieces plus the tangent lengths to the virtual
+  corners, its width and height are those of the folded band the judge
+  walks itself, and every bend that is not 90° has its angle on it;
+* the folded extents in the title block are the box around the folded
+  part's own vertices, when the folded view `<views>/<name>.view.json`
+  (the name without `_flat`) exists;
 * no two texts overlap, and no line runs through a text;
-* the file stays small: 24 KB plus 4 KB a page.
+* the file stays small: 25 KB plus 4 KB a page.
 
 A folded sheet (kind "folded" in the report) is judged against the view
 JSON the dossier was drawn from, `<views>/<name>.view.json`, instead:
@@ -53,7 +65,7 @@ import pymupdf
 PT = 25.4 / 72.0
 SHEETS = {"A4": (210.0, 297.0), "A3": (420.0, 297.0)}
 SAME = 0.06
-SIZE_BASE = 24_000
+SIZE_BASE = 25_000
 SIZE_PER_PAGE = 4_000
 
 
@@ -197,11 +209,24 @@ DESCENDERS = set("gjpqy,;()[]{}")
 
 
 def page_texts(page):
-    """(text, box in mm from the lower left, rotated?) for every span. The
-    box is the glyphs' own: cap height above the baseline and, when the text
-    has descenders, a fifth of the size below it, not the font's line box."""
+    """(text, box in mm from the lower left, rotated?, oriented box) for
+    every span. The box is the glyphs' own: cap height above the baseline
+    and, when the text has descenders, a fifth of the size below it, not
+    the font's line box. The oriented box (centre, along, up, half-length,
+    half-height) follows the baseline, so a value written along a slanted
+    dimension line is judged in its own frame."""
     h = page.rect.height
     out = []
+    # The embedded fonts, for the exact advance of a span, whatever its
+    # angle (the bounding box of slanted text is too wide).
+    fonts = {}
+    for xref, _, _, basefont, *_ in page.get_fonts(full=True):
+        name = basefont.split("+")[-1]
+        if name not in fonts:
+            try:
+                fonts[name] = pymupdf.Font(fontbuffer=page.parent.extract_font(xref)[3])
+            except (RuntimeError, ValueError):
+                pass
     for block in page.get_text("dict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)["blocks"]:
         for line in block.get("lines", []):
             dx, dy = line["dir"]
@@ -211,26 +236,66 @@ def page_texts(page):
                 if not t:
                     continue
                 size = span["size"]
-                asc = span["ascender"] * size
-                desc = -span["descender"] * size
                 want_desc = DESC * size if any(ch in DESCENDERS for ch in t) else 0.0
                 x0, y0, x1, y1 = span["bbox"]
-                # Which side of the box the glyphs' top and bottom lie on.
-                if abs(dx) > 0.5:
-                    if dx > 0:
-                        y0 += asc - CAP * size
-                        y1 -= desc - want_desc
-                    else:
-                        y1 -= asc - CAP * size
-                        y0 += desc - want_desc
-                elif dy < 0:
-                    x0 += asc - CAP * size
-                    x1 -= desc - want_desc
+                ox, oy = span["origin"]
+                up = (dy, -dx)
+                font = fonts.get(span["font"].split("+")[-1])
+                if font is not None:
+                    lead = font.text_length(span["text"][: len(span["text"]) - len(span["text"].lstrip())], fontsize=size)
+                    a0 = lead
+                    a1 = lead + font.text_length(t, fontsize=size)
                 else:
-                    x1 -= asc - CAP * size
-                    x0 += desc - want_desc
-                out.append((t, (x0 * PT, (h - y1) * PT, x1 * PT, (h - y0) * PT), rotated))
+                    # Along the baseline: the bounding box's corners
+                    # projected on it (exact for horizontal and vertical
+                    # text).
+                    along = [(cx - ox) * dx + (cy - oy) * dy for cx in (x0, x1) for cy in (y0, y1)]
+                    a0, a1 = min(along), max(along)
+                p0, p1 = -want_desc, CAP * size
+                cx = ox + dx * (a0 + a1) / 2 + up[0] * (p0 + p1) / 2
+                cy = oy + dy * (a0 + a1) / 2 + up[1] * (p0 + p1) / 2
+                obox = (
+                    (cx * PT, (h - cy) * PT),
+                    (dx, -dy),
+                    (up[0], -up[1]),
+                    (a1 - a0) / 2 * PT,
+                    (p1 - p0) / 2 * PT,
+                )
+                corners = []
+                for sa in (-1, 1):
+                    for sp in (-1, 1):
+                        corners.append((
+                            obox[0][0] + obox[1][0] * sa * obox[3] + obox[2][0] * sp * obox[4],
+                            obox[0][1] + obox[1][1] * sa * obox[3] + obox[2][1] * sp * obox[4],
+                        ))
+                box = (
+                    min(c[0] for c in corners),
+                    min(c[1] for c in corners),
+                    max(c[0] for c in corners),
+                    max(c[1] for c in corners),
+                )
+                out.append((t, box, rotated, obox))
     return out
+
+
+def seg_hits_obox(seg, obox, by):
+    """Whether the segment crosses the oriented box shrunk by `by`."""
+    (c, a, u, ha, hp) = obox
+    pts = [((p[0] - c[0]) * a[0] + (p[1] - c[1]) * a[1], (p[0] - c[0]) * u[0] + (p[1] - c[1]) * u[1]) for p in seg]
+    return seg_hits_box(pts, (-ha + by, -hp + by, ha - by, hp - by))
+
+
+def oboxes_overlap(p, q, by):
+    """Separating-axis test of two oriented boxes shrunk by `by`."""
+    for axis in (p[1], p[2], q[1], q[2]):
+        spans = []
+        for (c, a, u, ha, hp) in (p, q):
+            m = c[0] * axis[0] + c[1] * axis[1]
+            r = (ha - by) * abs(a[0] * axis[0] + a[1] * axis[1]) + (hp - by) * abs(u[0] * axis[0] + u[1] * axis[1])
+            spans.append((m - r, m + r))
+        if spans[0][1] <= spans[1][0] or spans[1][1] <= spans[0][0]:
+            return False
+    return True
 
 
 def page_segments(page):
@@ -329,22 +394,330 @@ def verapdf(jar, path):
     return "; ".join(lines[-4:])[:400] or f"exit {r.returncode}"
 
 
+# --- Flat sheets --------------------------------------------------------------
+
+
+def projections(d, direction, bound):
+    """Every value a station of a chain along `direction` may sit at (the
+    DXF's coordinates and the virtual corners projected on it), and the
+    metal's extent along it."""
+    dx, dy = direction
+    ang = math.degrees(math.atan2(dy, dx))
+
+    def proj(p):
+        return p[0] * dx + p[1] * dy
+
+    pool = set()
+    metal = []
+
+    def take(p, on_metal=True):
+        pool.add(round(proj(p), 3))
+        if on_metal:
+            metal.append(proj(p))
+
+    for a, b in d["lines"]:
+        take(a)
+        take(b)
+    for c, r, st, e in d["arcs"]:
+        take(c, False)
+        take(arc_point(c, r, st))
+        take(arc_point(c, r, e))
+        sweep = (e - st) % 360.0
+        for q in (0.0, 90.0, 180.0, 270.0, ang, ang + 180.0):
+            if (q - st) % 360.0 <= sweep:
+                take(arc_point(c, r, q))
+    for c, r in d["circles"]:
+        take(c, False)
+        for q in (0.0, 90.0, 180.0, 270.0, ang, ang + 180.0):
+            take(arc_point(c, r, q))
+    for a, b in d["bends"]:
+        take(a)
+        take(b)
+    for q in virtual_corners(d, bound):
+        pool.add(round(proj(q), 3))
+    return pool, min(metal), max(metal)
+
+
+def line_params(a, u, lines, arcs, circles):
+    """Parameters t along the ray a + t·u where it crosses the given DXF
+    lines, arcs and circles."""
+    out = []
+    for p, q in lines:
+        v = (q[0] - p[0], q[1] - p[1])
+        den = u[0] * v[1] - u[1] * v[0]
+        if abs(den) < 1e-9:
+            continue
+        t = ((p[0] - a[0]) * v[1] - (p[1] - a[1]) * v[0]) / den
+        s2 = ((p[0] - a[0]) * u[1] - (p[1] - a[1]) * u[0]) / den
+        if -1e-6 <= s2 <= 1.0 + 1e-6:
+            out.append(t)
+    for c, r, st, e in [(c, r, st, e) for c, r, st, e in arcs] + [(c, r, 0.0, 360.0) for c, r in circles]:
+        # |a + t u - c|² = r²
+        w = (a[0] - c[0], a[1] - c[1])
+        b = 2 * (w[0] * u[0] + w[1] * u[1])
+        cc = w[0] * w[0] + w[1] * w[1] - r * r
+        disc = b * b - 4 * cc
+        if disc < 0:
+            continue
+        for t in ((-b - math.sqrt(disc)) / 2, (-b + math.sqrt(disc)) / 2):
+            p = (a[0] + t * u[0], a[1] + t * u[1])
+            deg = math.degrees(math.atan2(p[1] - c[1], p[0] - c[0]))
+            if (deg - st) % 360.0 <= (e - st) % 360.0 + 1e-6 or (e - st) % 360.0 == 0.0:
+                out.append(t)
+    return out
+
+
+def band_box(pieces, bends, t):
+    """Walk the section the report describes (outer skin up, a down bend
+    turning clockwise) and return the box of the folded band after turning
+    its longest flange horizontal: (width, height)."""
+    pts = []
+    p = (0.0, 0.0)
+    h = (1.0, 0.0)
+    headings = []
+    for piece in pieces:
+        n = (-h[1], h[0])
+        if piece["kind"] == "flat":
+            ln = piece["length"]
+            q = (p[0] + h[0] * ln, p[1] + h[1] * ln)
+            pts += [p, q, (p[0] - n[0] * t, p[1] - n[1] * t), (q[0] - n[0] * t, q[1] - n[1] * t)]
+            headings.append((ln, h))
+            p = q
+            continue
+        b = bends[piece["bend"]]
+        theta = math.radians(b["angleDeg"])
+        down = b["direction"] == "down"
+        r_in = b["insideRadius"]
+        if down:
+            c = (p[0] - n[0] * (r_in + t), p[1] - n[1] * (r_in + t))
+            rot = -theta
+        else:
+            c = (p[0] + n[0] * r_in, p[1] + n[1] * r_in)
+            rot = theta
+        for k in range(0, 13):
+            a = rot * k / 12.0
+            ca, sa = math.cos(a), math.sin(a)
+            for q in (p, (p[0] - n[0] * t, p[1] - n[1] * t)):
+                w = (q[0] - c[0], q[1] - c[1])
+                pts.append((c[0] + w[0] * ca - w[1] * sa, c[1] + w[0] * sa + w[1] * ca))
+        ca, sa = math.cos(rot), math.sin(rot)
+        w = (p[0] - c[0], p[1] - c[1])
+        p = (c[0] + w[0] * ca - w[1] * sa, c[1] + w[0] * sa + w[1] * ca)
+        h = (h[0] * ca - h[1] * sa, h[0] * sa + h[1] * ca)
+    _, hl = max(headings, key=lambda x: x[0])
+    ca, sa = hl[0], -hl[1]
+    rp = [(x * ca - y * sa, x * sa + y * ca) for x, y in pts]
+    return (
+        max(q[0] for q in rp) - min(q[0] for q in rp),
+        max(q[1] for q in rp) - min(q[1] for q in rp),
+    )
+
+
+def flat_problems(sheet, d, words, folded_solid, scale=1.0):
+    """What is wrong with one flat sheet, given its DXF, the words on its
+    page and, when known, the folded part's solid."""
+    problems = []
+    bends = {b["nr"]: b for b in sheet["bends"]}
+    t = sheet["thickness"]
+    (x_lo, x_hi), (y_lo, y_hi) = dxf_extent(d)
+    bound = min(max(0.02 * max(x_hi - x_lo, y_hi - y_lo), 6.0), 25.0)
+
+    # Chains: edge to edge, on the blank's coordinates, values printed.
+    stations = {}  # direction -> list of t
+    for c in sheet.get("chains", []):
+        u = tuple(c["direction"])
+        key = (round(u[0], 6), round(u[1], 6))
+        label = f"{c['kind']} chain along ({u[0]:.3g}, {u[1]:.3g})"
+        pool, lo, hi = projections(d, u, bound)
+        ts = [s["t"] for s in c["stations"]]
+        if len(ts) < 2:
+            problems.append(f"{label}: fewer than two stations")
+            continue
+        if any(b - a <= 1e-6 for a, b in zip(ts, ts[1:])):
+            problems.append(f"{label}: stations out of order")
+        axis_chain = abs(u[0]) < 1e-9 or abs(u[1]) < 1e-9
+        if axis_chain and (abs(ts[0] - lo) > SAME or abs(ts[-1] - hi) > SAME):
+            problems.append(
+                f"{label}: runs from {mm_text(ts[0])} to {mm_text(ts[-1])}, the metal from {mm_text(lo)} to {mm_text(hi)}"
+            )
+        if not axis_chain and abs(ts[0] - lo) > SAME and abs(ts[-1] - hi) > SAME:
+            problems.append(f"{label}: neither end is at the edge of the metal")
+        for v in ts:
+            if not any(abs(v - q) <= SAME for q in pool):
+                problems.append(f"{label}: station {mm_text(v)} is no coordinate of the blank")
+        if len(c["values"]) != len(ts) - 1 or len(c["texts"]) != len(ts) - 1:
+            problems.append(f"{label}: {len(c['values'])} values for {len(ts)} stations")
+            continue
+        for i, (v, txt) in enumerate(zip(c["values"], c["texts"])):
+            if abs(v - (ts[i + 1] - ts[i])) > 1e-3:
+                problems.append(f"{label}: value {txt} is not the gap between its stations")
+            if mm_text(v) != txt:
+                problems.append(f"{label}: text {txt!r} is not {mm_text(v)!r}")
+            if txt not in words:
+                problems.append(f"{label}: {txt!r} not printed")
+        stations.setdefault(key, []).extend(ts)
+
+    def located(u, v):
+        key = (round(u[0], 6), round(u[1], 6))
+        return any(abs(v - q) <= SAME for q in stations.get(key, []))
+
+    if (1.0, 0.0) not in stations:
+        problems.append("no chain along x")
+    if (0.0, 1.0) not in stations:
+        problems.append("no chain along y")
+    for c, r in d["circles"]:
+        if not located((1.0, 0.0), c[0]) or not located((0.0, 1.0), c[1]):
+            problems.append(f"hole at ({mm_text(c[0])}, {mm_text(c[1])}) not located")
+    for nr, (a, b) in enumerate(d["bends"], 1):
+        ln = math.dist(a, b)
+        if ln < 1e-9:
+            continue
+        n = ((b[1] - a[1]) / ln, -(b[0] - a[0]) / ln)
+        hit = False
+        for sg in (1.0, -1.0):
+            u = (sg * n[0], sg * n[1])
+            if abs(u[0]) < 1e-9:
+                u = (0.0, 1.0)
+            elif abs(u[1]) < 1e-9:
+                u = (1.0, 0.0)
+            if located(u, a[0] * u[0] + a[1] * u[1]):
+                hit = True
+        if not hit:
+            problems.append(f"bend line {nr} not dimensioned")
+
+    # Hole callouts.
+    by_dia = {}
+    for c, r in d["circles"]:
+        by_dia[round(2 * r, 1)] = by_dia.get(round(2 * r, 1), 0) + 1
+    for dia, n in by_dia.items():
+        want_text = f"⌀{mm_text(dia)}" if n == 1 else f"{n}× ⌀{mm_text(dia)}"
+        if want_text not in words:
+            problems.append(f"no callout {want_text!r}")
+
+    # Bend tags, notes and table.
+    for nr in range(1, len(d["bends"]) + 1):
+        if str(nr) not in words:
+            problems.append(f"no tag for bend {nr}")
+    if len(sheet["bends"]) != len(d["bends"]):
+        problems.append(f"{len(sheet['bends'])} bends in the table, {len(d['bends'])} lines in the DXF")
+    for b in sheet["bends"]:
+        if b.get("note") and b["note"] not in words:
+            problems.append(f"bend {b['nr']}: note {b['note']!r} not printed")
+
+    # Sections.
+    for sec in sheet.get("sections", []):
+        L = sec["letter"]
+        label = f"section {L}-{L}"
+        if not any(w.startswith(f"{word} {L}-{L}") for w in words for word in ("DOORSNEDE", "SECTION", "COUPE")):
+            problems.append(f"{label}: title not printed")
+        if len(words.get(L, [])) < 3:
+            problems.append(f"{label}: cut marker letter {L!r} not printed")
+        a, b = sec["cut"]
+        ln = math.dist(a, b)
+        u = ((b[0] - a[0]) / ln, (b[1] - a[1]) / ln)
+        edges = line_params(a, u, d["lines"], d["arcs"], d["circles"])
+        if not edges:
+            problems.append(f"{label}: the cut misses the blank")
+            continue
+        t_in, t_out = min(edges), max(edges)
+        pieces = sec["pieces"]
+        nrs = [p["bend"] for p in pieces if p["kind"] == "bend"]
+        if nrs != sec["bends"] or len(pieces) != 2 * len(nrs) + 1 or any(
+            (p["kind"] == "flat") != (i % 2 == 0) for i, p in enumerate(pieces)
+        ):
+            problems.append(f"{label}: pieces do not alternate flat and bend as the bends say")
+            continue
+        zones = []
+        for nr in nrs:
+            if nr not in bends or nr > len(d["bends"]):
+                problems.append(f"{label}: bend {nr} is not in the table")
+                break
+            p, q = d["bends"][nr - 1]
+            tt = line_params(a, u, [(p, q)], [], [])
+            if not tt:
+                problems.append(f"{label}: the cut misses bend line {nr}")
+                break
+            bl = math.dist(p, q)
+            n = ((q[1] - p[1]) / bl, -(q[0] - p[0]) / bl)
+            cosang = abs(u[0] * n[0] + u[1] * n[1])
+            zones.append((tt[0], bends[nr]["allowance"] / 2.0 / max(cosang, 1e-9)))
+        if len(zones) != len(nrs):
+            continue
+        edges_t = [t_in] + [x for z, hw in zones for x in (z - hw, z + hw)] + [t_out]
+        for i, piece in enumerate(p for p in pieces if p["kind"] == "flat"):
+            want = edges_t[2 * i + 1] - edges_t[2 * i]
+            if abs(piece["length"] - want) > SAME:
+                problems.append(
+                    f"{label}: flat piece {i} is {mm_text(piece['length'])}, the DXF says {mm_text(want)}"
+                )
+        # Flange lengths to the virtual corners, the band's box, angles.
+        dims = sec["dimensions"]
+        for i, piece in enumerate(pieces):
+            if piece["kind"] != "flat":
+                continue
+            want = piece["length"]
+            for j in (i - 1, i + 1):
+                if 0 <= j < len(pieces):
+                    bb = bends[pieces[j]["bend"]]
+                    want += (bb["insideRadius"] + t) * math.tan(math.radians(bb["angleDeg"]) / 2.0)
+            dim = next((x for x in dims if x["kind"] == "flange" and x["sources"] == [f"piece:{i}"]), None)
+            if dim is None:
+                problems.append(f"{label}: flange of piece {i} ({mm_text(want)}) not dimensioned")
+            elif abs(dim["value"] - want) > SAME or dim["text"] != mm_text(want):
+                problems.append(f"{label}: flange of piece {i} is {dim['text']}, not {mm_text(want)}")
+        w, h = band_box(pieces, bends, t)
+        if abs(sec["width"] - w) > SAME or abs(sec["height"] - h) > SAME:
+            problems.append(
+                f"{label}: band is {mm_text(sec['width'])} × {mm_text(sec['height'])}, the judge walks {mm_text(w)} × {mm_text(h)}"
+            )
+        for kind, want in (("width", w), ("height", h)):
+            for dim in (x for x in dims if x["kind"] == kind):
+                if abs(dim["value"] - want) > SAME or dim["text"] != mm_text(want):
+                    problems.append(f"{label}: {kind} {dim['text']} is not {mm_text(want)}")
+        for nr in nrs:
+            ang = bends[nr]["angleDeg"]
+            dim = next((x for x in dims if x["kind"] == "angle" and x["sources"] == [f"bend:{nr}"]), None)
+            if abs(ang - 90.0) > 0.05 and dim is None:
+                problems.append(f"{label}: bend {nr} is {mm_text(ang)}°, not drawn")
+            if dim is not None and (abs(dim["value"] - ang) > 0.05 or dim["text"] != f"{mm_text(ang)}°"):
+                problems.append(f"{label}: angle of bend {nr} is {dim['text']}, not {mm_text(ang)}°")
+        for dim in dims:
+            if dim["text"] not in words:
+                problems.append(f"{label}: {dim['text']!r} not printed")
+
+    # Folded extents against the folded part.
+    ext = sheet.get("extents")
+    if folded_solid is not None:
+        vs = folded_solid["vertices"]
+        box = sorted(scale * (max(p[i] for p in vs) - min(p[i] for p in vs)) for i in range(3))
+        if ext is None:
+            problems.append("no folded extents, the folded part is " + " × ".join(mm_text(x) for x in box))
+        elif any(abs(a - b) > SAME for a, b in zip(sorted(ext), box)):
+            problems.append(
+                "folded extents " + " × ".join(mm_text(x) for x in ext) + " are not the folded part's " + " × ".join(mm_text(x) for x in box)
+            )
+    if ext is not None:
+        want = " × ".join(mm_text(x) for x in ext)
+        if not any(want in w for w in words):
+            problems.append(f"extents {want!r} not printed")
+    return problems
+
+
 # --- The judge --------------------------------------------------------------
 
 
 def collision_problems(page, texts, prob, tag):
     """No two texts overlap, and no line runs through a text."""
-    boxes = [(t, box) for t, box, _ in texts]
+    boxes = [(t, box, obox) for t, box, _, obox in texts]
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
-            if boxes_overlap(shrink(boxes[i][1], 0.1), shrink(boxes[j][1], 0.1)):
+            if oboxes_overlap(boxes[i][2], boxes[j][2], 0.1):
                 prob(f"{tag}: texts {boxes[i][0]!r} and {boxes[j][0]!r} overlap")
     segs = page_segments(page)
-    for t, box in boxes:
-        inner = shrink(box, 0.25)
-        if inner[0] >= inner[2] or inner[1] >= inner[3]:
+    for t, box, obox in boxes:
+        if obox[3] <= 0.25 or obox[4] <= 0.25:
             continue
-        n = sum(1 for s in segs if seg_hits_box(s, inner))
+        n = sum(1 for s in segs if seg_hits_box(s, shrink(box, 0.25)) and seg_hits_obox(s, obox, 0.25))
         if n:
             prob(f"{tag}: {n} line(s) run through {t!r} at ({box[0]:.1f}, {box[1]:.1f})")
 
@@ -376,6 +749,15 @@ def canon(axis):
 def solid_of(view, sheet):
     part = next(p for p in view["parts"] if p["id"] == sheet["partIds"][0])
     return next(s for s in view["solids"] if s["id"] == part["solid"])
+
+
+def part_scale(view, sheet):
+    """The uniform scale of the part's matrix (1 for a rotation)."""
+    part = next(p for p in view["parts"] if p["id"] == sheet["partIds"][0])
+    m = part.get("matrix")
+    if not m:
+        return 1.0
+    return math.sqrt(m[0][0] ** 2 + m[1][0] ** 2 + m[2][0] ** 2)
 
 
 def round_holes(solid):
@@ -704,7 +1086,7 @@ def judge(path, dxf_root, jar, views_root=None):
             prob(f"{tag}: {w:.1f} × {h:.1f} mm is not {sheet['paper']}")
         texts = page_texts(page)
         words = {}
-        for t, box, _ in texts:
+        for t, box, _, _ in texts:
             words.setdefault(t, []).append(box)
 
         # Claims against the page.
@@ -725,70 +1107,28 @@ def judge(path, dxf_root, jar, views_root=None):
             collision_problems(page, texts, prob, tag)
             continue
 
-        # Claims and must-haves against the DXF.
+        # Claims and must-haves against the DXF and the folded part.
         dxf_path = os.path.join(dxf_dir, sheet["partIds"][0] + ".dxf")
         try:
             d = read_dxf(dxf_path)
         except OSError as e:
             prob(f"{tag}: dxf: {e}")
             continue
-        xs, ys = dxf_coordinates(d)
-        (x_lo, x_hi), (y_lo, y_hi) = dxf_extent(d)
-        bound = min(max(0.02 * max(x_hi - x_lo, y_hi - y_lo), 6.0), 25.0)
-        for cx, cy in virtual_corners(d, bound):
-            xs.add(round(cx, 3))
-            ys.add(round(cy, 3))
-        claimed = {"x": [], "y": []}
-        for dim in sheet["dimensions"]:
-            if dim["kind"] != "ordinate":
-                continue
-            axis = dim["axis"]
-            v = dim["value"]
-            claimed[axis].append(v)
-            pool = xs if axis == "x" else ys
-            if not any(abs(v - c) <= SAME for c in pool):
-                prob(f"{tag}: ordinate {axis} = {dim['text']} is no coordinate of the blank")
-
-        def has(axis, v):
-            return any(abs(v - c) <= SAME for c in claimed[axis])
-
-        for v in (x_lo, x_hi):
-            if not has("x", v):
-                prob(f"{tag}: blank extent x = {mm_text(v)} not dimensioned")
-        for v in (y_lo, y_hi):
-            if not has("y", v):
-                prob(f"{tag}: blank extent y = {mm_text(v)} not dimensioned")
-        for c, r in d["circles"]:
-            if not has("x", c[0]) or not has("y", c[1]):
-                prob(f"{tag}: hole at ({mm_text(c[0])}, {mm_text(c[1])}) not located")
-        for a, b in d["bends"]:
-            if abs(a[0] - b[0]) < 1e-6:
-                need = [("x", a[0])]
-            elif abs(a[1] - b[1]) < 1e-6:
-                need = [("y", a[1])]
-            else:
-                need = [("x", a[0]), ("y", a[1]), ("x", b[0]), ("y", b[1])]
-            for axis, v in need:
-                if not has(axis, v):
-                    prob(f"{tag}: bend line {axis} = {mm_text(v)} not dimensioned")
-
-        # Hole callouts.
-        by_dia = {}
-        for c, r in d["circles"]:
-            by_dia.setdefault(round(2 * r, 1), 0)
-            by_dia[round(2 * r, 1)] += 1
-        for dia, n in by_dia.items():
-            want_text = f"⌀{mm_text(dia)}" if n == 1 else f"{n}× ⌀{mm_text(dia)}"
-            if want_text not in words:
-                prob(f"{tag}: no callout {want_text!r}")
-
-        # Bend tags.
-        for nr in range(1, len(d["bends"]) + 1):
-            if str(nr) not in words:
-                prob(f"{tag}: no tag for bend {nr}")
-        if len(sheet["bends"]) != len(d["bends"]):
-            prob(f"{tag}: {len(sheet['bends'])} bends in the table, {len(d['bends'])} lines in the DXF")
-
+        folded_solid = None
+        scale = 1.0
+        if name.endswith("_flat") or "_flat_" in name:
+            base = name.replace("_flat", "", 1)
+            view_path = os.path.join(views_root or "", base + ".view.json")
+            if os.path.exists(view_path):
+                with open(view_path, encoding="utf-8") as f:
+                    fv = json.load(f)
+                try:
+                    folded_solid = solid_of(fv, sheet)
+                    scale = part_scale(fv, sheet)
+                except StopIteration:
+                    prob(f"{tag}: part {sheet['partIds'][0]} is not in {base}.view.json")
+        for p in flat_problems(sheet, d, words, folded_solid, scale):
+            prob(f"{tag}: {p}")
         collision_problems(page, texts, prob, tag)
 
     if out["problems"]:

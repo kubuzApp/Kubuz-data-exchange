@@ -155,6 +155,28 @@ impl Content {
     /// Append a counter-clockwise arc from `start` to `end` degrees to the
     /// current path, as cubic Béziers of at most 90° each. The path must
     /// already stand at the arc's start.
+    /// Append an arc of `sweep` degrees (negative: clockwise) from `start`
+    /// about `c`, as Béziers, continuing the current path.
+    pub fn arc_sweep(&mut self, c: P2, r: f64, start: f64, sweep: f64) {
+        if sweep.abs() < 1e-9 {
+            return;
+        }
+        let pieces = (sweep.abs() / 90.0).ceil().max(1.0) as usize;
+        let step = (sweep / pieces as f64).to_radians();
+        let mut a0 = start.to_radians();
+        for _ in 0..pieces {
+            let a1 = a0 + step;
+            let k = 4.0 / 3.0 * ((a1 - a0) / 4.0).tan();
+            let (s0, c0) = a0.sin_cos();
+            let (s1, c1) = a1.sin_cos();
+            let p1 = [c[0] + r * (c0 - k * s0), c[1] + r * (s0 + k * c0)];
+            let p2 = [c[0] + r * (c1 + k * s1), c[1] + r * (s1 - k * c1)];
+            let p = [c[0] + r * c1, c[1] + r * s1];
+            self.curve_to(p1, p2, p);
+            a0 = a1;
+        }
+    }
+
     pub fn arc_segments(&mut self, c: P2, r: f64, start: f64, end: f64) {
         let sweep = (end - start).rem_euclid(360.0);
         let sweep = if sweep == 0.0 { 360.0 } else { sweep };

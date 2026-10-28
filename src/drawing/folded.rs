@@ -15,13 +15,13 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use super::dims::{self, arrow, sample, sample_line, Layout, H, NARROW, WIDE};
 use super::features::{Features, Ordinate, SAME};
 use super::flat::{BendReport, DimReport, SheetInfo, SheetReport};
 use super::project::{
     add, coincident_circles, dot, norm, project, sample_edge, scale as mul, topology, Basis,
     Projection, Topology,
 };
+use super::running::{self as dims, arrow, sample, sample_line, Layout, H, NARROW, WIDE};
 use super::sheet::{self, Paper};
 use super::text::{self, Lang};
 use super::Meta;
@@ -938,6 +938,7 @@ fn plan_views(
         let blank = crate::dxf::blank::Blank {
             loops,
             bends: vec![],
+            zones: vec![],
             min: [0.0, 0.0],
             max,
         };
@@ -1272,6 +1273,7 @@ fn plan_views(
         let blank = crate::dxf::blank::Blank {
             loops,
             bends: vec![],
+            zones: vec![],
             min: [0.0, 0.0],
             max,
         };
@@ -1915,7 +1917,35 @@ pub fn sheet(
     c.fill_gray(0.0);
 
     // Title block values.
-    let v = |c: &mut Content, key: &str, h: f64, t: &str| sheet::value(c, paper, key, h, t);
+    let tv = sheet::TitleValues {
+        id: info.title.to_string(),
+        description: meta.title.clone(),
+        customer: meta.customer.clone(),
+        quantity: info.part_ids.len(),
+        sheet: info.index,
+        sheets: info.total,
+        designer: meta.created_by.clone(),
+        date: meta.date.clone(),
+        approved: meta.approved_by.clone(),
+        approved_date: meta.approved_date.clone(),
+        scale: text::scale(s),
+        material: info.material.to_string(),
+        thickness: if info.thickness > 0.0 {
+            format!("{} mm", text::mm(info.thickness))
+        } else {
+            String::new()
+        },
+        weight: String::new(),
+        extents: format!(
+            "{} × {} × {}",
+            text::mm(bbox[0]),
+            text::mm(bbox[1]),
+            text::mm(bbox[2])
+        ),
+    };
+    sheet::title_values(&mut c, paper, lang, &tv);
+    let scale_text = text::scale(s);
+    let v = |_c: &mut Content, _key: &str, _h: f64, _t: &str| {};
     v(&mut c, "title", 5.0, info.title);
     let id = if meta.number.is_empty() {
         format!("P-{:03}", info.index)
@@ -1939,7 +1969,6 @@ pub fn sheet(
     v(&mut c, "doctype", 2.5, lang.t("detail"));
     v(&mut c, "status", 2.5, &meta.status);
     v(&mut c, "revision", 2.5, &meta.revision);
-    let scale_text = text::scale(s);
     v(&mut c, "scale", 3.5, &scale_text);
     v(
         &mut c,
@@ -2009,6 +2038,7 @@ pub fn sheet(
                 x += TABLE_COLS[j];
             }
             bend_reports.push(BendReport {
+                note: None,
                 nr: b.nr,
                 id: b.zone.clone(),
                 angle_deg: b.angle_deg,
@@ -2182,6 +2212,7 @@ pub fn sheet(
                 text: ang.text.clone(),
             });
             dimensions.push(DimReport {
+                section: None,
                 kind: "angle".into(),
                 axis: None,
                 value: ang.value,
@@ -2214,6 +2245,7 @@ pub fn sheet(
         for (axis, labels) in [("x", &lo.xs), ("y", &lo.ys)] {
             for l in labels {
                 dimensions.push(DimReport {
+                    section: None,
                     kind: "ordinate".into(),
                     axis: Some(format!("{}:{axis}", view.place.name())),
                     value: l.value,
@@ -2225,6 +2257,7 @@ pub fn sheet(
         }
         for co in &lo.callouts {
             dimensions.push(DimReport {
+                section: None,
                 kind: co.kind.into(),
                 axis: Some(view.place.name()),
                 value: co.value,
@@ -2252,6 +2285,9 @@ pub fn sheet(
     let label = format!("Pos {}", info.index);
     doc.add_page(w, h, &[paper.form_name()], c, &label);
     Ok(SheetReport {
+        chains: vec![],
+        sections: vec![],
+        extents: None,
         index: info.index,
         label,
         title: info.title.to_string(),

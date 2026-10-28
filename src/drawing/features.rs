@@ -39,6 +39,8 @@ pub struct Corner {
     /// Part of a bend relief, a notch or a small round: cut from the DXF,
     /// not dimensioned.
     pub minor: bool,
+    /// An end or extreme point of a free-form run.
+    pub on_curve: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +189,7 @@ pub fn features(blank: &Blank) -> Features {
                                 p,
                                 virtual_: true,
                                 minor,
+                                on_curve: false,
                             });
                         } else {
                             // Parallel lines: a slot end. Its centre fixes it.
@@ -194,6 +197,7 @@ pub fn features(blank: &Blank) -> Features {
                                 p: c,
                                 virtual_: true,
                                 minor,
+                                on_curve: false,
                             });
                         }
                         if minor {
@@ -209,6 +213,7 @@ pub fn features(blank: &Blank) -> Features {
                             p: c,
                             virtual_: true,
                             minor: false,
+                            on_curve: false,
                         });
                         let (p0, p1) = ends(&lp[i]);
                         for p in [p0, p1] {
@@ -216,6 +221,7 @@ pub fn features(blank: &Blank) -> Features {
                                 p,
                                 virtual_: false,
                                 minor: false,
+                                on_curve: false,
                             });
                         }
                     }
@@ -245,6 +251,7 @@ pub fn features(blank: &Blank) -> Features {
                             p: a,
                             virtual_: false,
                             minor,
+                            on_curve: false,
                         });
                     }
                 }
@@ -273,6 +280,7 @@ pub fn features(blank: &Blank) -> Features {
                             p,
                             virtual_: true,
                             minor: false,
+                            on_curve: false,
                         });
                     }
                 }
@@ -286,6 +294,7 @@ pub fn features(blank: &Blank) -> Features {
                     p: *p,
                     virtual_: false,
                     minor: false,
+                    on_curve: true,
                 });
             }
             f.curves.push(Curve {
@@ -307,6 +316,7 @@ pub fn features(blank: &Blank) -> Features {
                     p: *p,
                     virtual_: false,
                     minor: false,
+                    on_curve: true,
                 });
             }
             f.curves.push(Curve {
@@ -371,7 +381,7 @@ fn run_extent(segs: &[Seg]) -> f64 {
 }
 
 /// The loop with the widest extent: the outline, the rest being cutouts.
-fn outer_loop(loops: &[Vec<Seg>]) -> usize {
+pub(crate) fn outer_loop(loops: &[Vec<Seg>]) -> usize {
     let mut best = (0usize, -1.0f64);
     for (i, lp) in loops.iter().enumerate() {
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
@@ -830,6 +840,7 @@ mod tests {
     #[test]
     fn collinear_edges_merge_and_a_fillet_gives_a_virtual_corner() {
         let blank = Blank {
+            zones: vec![],
             loops: vec![
                 rect_with_fillet(),
                 vec![

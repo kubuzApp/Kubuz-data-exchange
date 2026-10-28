@@ -22,7 +22,11 @@ fn every_flat_fixture_becomes_a_sheet() {
         let per_sheet = out.pdf.len() / out.sheets.len();
         assert!(per_sheet < 40_000, "{name}: {per_sheet} bytes per sheet");
         for s in &out.sheets {
-            assert!(!s.dimensions.is_empty(), "{name} {}", s.title);
+            assert!(
+                !s.dimensions.is_empty() || !s.chains.is_empty(),
+                "{name} {}",
+                s.title
+            );
             assert!(s.scale_factor <= 5.0);
         }
     }

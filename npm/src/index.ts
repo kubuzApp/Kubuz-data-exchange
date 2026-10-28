@@ -41,6 +41,14 @@ export type DrawingMeta = {
   approvedBy?: string;
   /** `YYYY-MM-DD`. */
   date?: string;
+  /** `YYYY-MM-DD`; blank when not approved. */
+  approvedDate?: string;
+  /** The customer named in the title block. */
+  customer?: string;
+  /** The owner's address lines under its name in the title block. */
+  address?: string[];
+  /** Density in kg/m³ by material name, for the weight in the title block. */
+  densities?: Record<string, number>;
   /** The dossier's title: the configuration or the order. */
   title?: string;
   /** Drawing number prefix; each sheet is `<number>-<position>`. */
@@ -56,13 +64,16 @@ export type DrawingMeta = {
 };
 
 export type DrawingDimension = {
-  kind: "ordinate" | "diameter" | "radius" | "angle";
+  /** `flange`, `width`, `height` and `angle` belong to a section view. */
+  kind: "ordinate" | "diameter" | "radius" | "angle" | "flange" | "width" | "height";
   /** `x` or `y` on a flat sheet; `<view>:x` or `<view>:y` on a folded one. */
   axis?: string;
   value: number;
   text: string;
   count?: number;
   sources: string[];
+  /** The section view's letter when the dimension is on one. */
+  section?: string;
 };
 
 export type DrawingBend = {
@@ -72,6 +83,51 @@ export type DrawingBend = {
   direction: "up" | "down";
   insideRadius: number;
   allowance: number;
+  /** The bend table's note for this bend on a flat sheet. */
+  note?: string;
+};
+
+/** One station of a chain dimension: a position along the chain's direction (model mm) and the features that put it there. */
+export type DrawingStation = { t: number; sources: string[] };
+
+/** One chain of running dimensions on a flat sheet: along `direction` from the first station to the last, each value the distance between consecutive stations. */
+export type DrawingChain = {
+  kind: "bend" | "outline" | "hole" | "overall";
+  axis: "x" | "y" | "oblique";
+  direction: [number, number];
+  /** -1: below or left of the blank; 1: above or right. */
+  side: -1 | 1;
+  stations: DrawingStation[];
+  values: number[];
+  texts: string[];
+};
+
+/** One piece of a section's profile, entry to exit: a flat length or a bend. */
+export type DrawingPiece = {
+  kind: "flat" | "bend";
+  /** Flat pieces: the outside length in model mm. */
+  length?: number;
+  /** The drawn length of an interrupted flange. */
+  shown?: number;
+  /** Bend pieces: the bend number. */
+  bend?: number;
+};
+
+/** A section view of the folded part on a flat sheet: one cut across the bends it shows. */
+export type DrawingSection = {
+  letter: string;
+  /** The cut on the blank (model mm), entry to exit. */
+  cut: [[number, number], [number, number]];
+  direction: [number, number];
+  bends: number[];
+  pieces: DrawingPiece[];
+  scale: string;
+  scaleFactor: number;
+  /** Paper position of the walk's origin (the cut's entry, outer skin), in mm from the lower left. */
+  origin: [number, number];
+  width: number;
+  height: number;
+  dimensions: DrawingDimension[];
 };
 
 /** One view of a folded part on its sheet. */
@@ -112,7 +168,13 @@ export type DrawingSheet = {
   material: string;
   thickness: number;
   dimensions: DrawingDimension[];
+  /** Flat sheets: the running dimensions around the flat pattern. */
+  chains?: DrawingChain[];
   bends: DrawingBend[];
+  /** Flat sheets: section views of the folded flanges. */
+  sections?: DrawingSection[];
+  /** Flat sheets with bends: the folded part's L × W × H along the base flange's axes. */
+  extents?: [number, number, number];
   /** `flat`: the flat pattern; `folded`: orthographic views of the folded part. */
   kind: "flat" | "folded";
   /** Folded sheets: the part's L × W × H. */
