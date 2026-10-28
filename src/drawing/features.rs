@@ -449,7 +449,7 @@ fn dist(a: P2, b: P2) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 
-fn seg_len(s: &Seg) -> f64 {
+pub(crate) fn seg_len(s: &Seg) -> f64 {
     match *s {
         Seg::Line { a, b } => ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt(),
         Seg::Arc { r, start, end, .. } => {
@@ -908,6 +908,7 @@ mod tests {
             bends: vec![],
             min: [0.0, 0.0],
             max: [100.0, 50.0],
+            ..Default::default()
         };
         let f = features(&blank);
         assert_eq!(f.loops[0].len(), 5);

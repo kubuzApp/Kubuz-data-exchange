@@ -19,7 +19,7 @@ use crate::dxf::blank::{Blank, Seg, P2};
 use crate::pdf::{font, Content, Doc};
 
 /// ISO 5455 scales, largest first.
-const SCALES: [f64; 9] = [5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
+pub(crate) const SCALES: [f64; 9] = [5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 const VIEW_TITLE_H: f64 = 8.0;
 const SECTION_TITLE_H: f64 = 7.0;
 const TABLE_ROW: f64 = 5.0;
@@ -68,6 +68,24 @@ pub struct SheetReport {
     pub views: Vec<super::folded::ViewReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minor_bound: Option<f64>,
+    /// The sheet's page in the dossier, 0-based.
+    pub page: usize,
+    /// `laser`, `laser+bend` or `folded`.
+    pub route: String,
+    /// The position this blank is the mirror image of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_of: Option<usize>,
+    /// Per piece, kg, when the density is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+    /// Outline plus holes, mm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cut_length: Option<f64>,
+    /// Net, mm².
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub area: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holes: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -173,12 +191,20 @@ pub struct PieceReport {
 
 /// The values the title block and the outline need for one sheet.
 pub struct SheetInfo<'a> {
+    /// Position number.
     pub index: usize,
     pub total: usize,
+    /// This sheet's page in the dossier (0-based) and the page count.
+    pub page: usize,
+    pub pages: usize,
     pub title: &'a str,
     pub part_ids: &'a [String],
     pub material: &'a str,
     pub thickness: f64,
+    /// The position this blank is the mirror image of.
+    pub mirror_of: Option<usize>,
+    /// The parts list's page, which the title block links back to.
+    pub bom_page: Option<usize>,
 }
 
 /// One placed section.
@@ -255,6 +281,12 @@ fn notes(blank: &Blank, f: &Features, info: &SheetInfo, lang: Lang, sections: bo
         v.push(lang.t("section_note").to_string());
     }
     v.push(format!("{}. {}.", lang.t("mm"), lang.t("deburr")));
+    if let Some(m) = info.mirror_of {
+        v.push(format!(
+            "{}.",
+            lang.t("mirror_of").replace("{}", &m.to_string())
+        ));
+    }
     v.push(format!("DXF: {}.dxf", info.part_ids[0]));
     v
 }
@@ -445,7 +477,13 @@ pub fn plan(
 
 /// Weight from the blank's area, thickness and the material's density
 /// (kg/m³), when the meta knows it.
-fn weight(blank: &Blank, f: &Features, t: f64, material: &str, meta: &Meta) -> Option<f64> {
+pub(crate) fn weight(
+    blank: &Blank,
+    f: &Features,
+    t: f64,
+    material: &str,
+    meta: &Meta,
+) -> Option<f64> {
     let density = match meta.densities.get(material) {
         Some(d) => *d,
         None => density(material)?,
@@ -453,6 +491,12 @@ fn weight(blank: &Blank, f: &Features, t: f64, material: &str, meta: &Meta) -> O
     if t <= 0.0 {
         return None;
     }
+    let _ = blank;
+    Some(net_area(f) * 1e-6 * t * 1e-3 * density)
+}
+
+/// The blank's area less its holes, mm².
+pub(crate) fn net_area(f: &Features) -> f64 {
     let outer = super::features::outer_loop(&f.loops);
     let mut area = 0.0;
     for (li, lp) in f.loops.iter().enumerate() {
@@ -470,13 +514,11 @@ fn weight(blank: &Blank, f: &Features, t: f64, material: &str, meta: &Meta) -> O
             area -= a;
         }
     }
-    let _ = blank;
-    Some(area * t * density * 1e-9)
+    area
 }
 
-/// Density in kg/m³ of a sheet material by its usual names, when the meta
-/// gives none: steels, stainless steels, aluminium, copper, brass, zinc,
-/// titanium.
+/// Densities in kg/m³ by material name, for the weight when the meta
+/// gives none.
 pub fn density(material: &str) -> Option<f64> {
     let m: String = material
         .to_ascii_uppercase()
@@ -559,7 +601,7 @@ pub fn density(material: &str) -> Option<f64> {
     None
 }
 
-fn kg(w: f64) -> String {
+pub(crate) fn kg(w: f64) -> String {
     let v = if w >= 10.0 {
         (w * 10.0).round() / 10.0
     } else {
@@ -604,8 +646,8 @@ pub fn sheet(
         description: meta.title.clone(),
         customer: meta.customer.clone(),
         quantity: info.part_ids.len(),
-        sheet: info.index,
-        sheets: info.total,
+        sheet: info.page + 1,
+        sheets: info.pages,
         designer: meta.created_by.clone(),
         date: meta.date.clone(),
         approved: meta.approved_by.clone(),
@@ -803,40 +845,12 @@ pub fn sheet(
     if let (Some((ss, io)), Some(iso)) = (p.iso, &p.iso_lines) {
         c.width(0.35);
         for pl in &iso.polylines {
-            // Points closer than 0,15 mm on paper add nothing.
-            let mut pts: Vec<P2> = Vec::with_capacity(pl.len());
-            for (i, q) in pl.iter().enumerate() {
-                let q = [io[0] + q[0] * ss, io[1] + q[1] * ss];
-                let keep = match pts.last() {
-                    Some(l) => (q[0] - l[0]).hypot(q[1] - l[1]) >= 0.15 || i + 1 == pl.len(),
-                    None => true,
-                };
-                if keep {
-                    pts.push(q);
-                }
-            }
-            // Nor does a point within 0,05 mm of the line through its
-            // neighbours.
-            let mut simple: Vec<P2> = Vec::with_capacity(pts.len());
-            for (i, q) in pts.iter().enumerate() {
-                if i == 0 || i + 1 == pts.len() {
-                    simple.push(*q);
-                    continue;
-                }
-                let a = *simple.last().unwrap();
-                let b = pts[i + 1];
-                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-                let len = dx.hypot(dy).max(1e-9);
-                let dev = ((q[0] - a[0]) * dy - (q[1] - a[1]) * dx).abs() / len;
-                if dev >= 0.05 {
-                    simple.push(*q);
-                }
-            }
-            let length: f64 = simple
-                .windows(2)
-                .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
-                .sum();
-            if simple.len() >= 2 && length >= 0.3 {
+            let simple = thin(
+                pl.iter()
+                    .map(|q| [io[0] + q[0] * ss, io[1] + q[1] * ss])
+                    .collect(),
+            );
+            if simple.len() >= 2 {
                 c.polyline(&simple, false);
             }
         }
@@ -861,7 +875,10 @@ pub fn sheet(
 
     let (w, h) = paper.size();
     let label = format!("Pos {}", info.index);
-    doc.add_page(w, h, &[paper.form_name()], c, &label);
+    let page = doc.add_page(w, h, &[paper.form_name()], c, &label);
+    if let Some(bom) = info.bom_page {
+        doc.add_link(page, sheet::id_rect(paper), bom);
+    }
 
     let mut chains = Vec::new();
     for ch in &p.layout.chains {
@@ -923,7 +940,54 @@ pub fn sheet(
         size: None,
         views: vec![],
         minor_bound: None,
+        page: info.page,
+        route: String::new(),
+        mirror_of: info.mirror_of,
+        weight: None,
+        cut_length: None,
+        area: None,
+        holes: None,
     })
+}
+
+/// Thin a polyline on paper: points closer than 0,15 mm add nothing, nor
+/// does a point within 0,05 mm of the line through its neighbours; a
+/// polyline shorter than 0,3 mm is dropped.
+pub(crate) fn thin(pts: Vec<P2>) -> Vec<P2> {
+    let n = pts.len();
+    let mut kept: Vec<P2> = Vec::with_capacity(n);
+    for (i, q) in pts.iter().enumerate() {
+        let keep = match kept.last() {
+            Some(l) => (q[0] - l[0]).hypot(q[1] - l[1]) >= 0.15 || i + 1 == n,
+            None => true,
+        };
+        if keep {
+            kept.push(*q);
+        }
+    }
+    let mut simple: Vec<P2> = Vec::with_capacity(kept.len());
+    for (i, q) in kept.iter().enumerate() {
+        if i == 0 || i + 1 == kept.len() {
+            simple.push(*q);
+            continue;
+        }
+        let a = *simple.last().unwrap();
+        let b = kept[i + 1];
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = dx.hypot(dy).max(1e-9);
+        let dev = ((q[0] - a[0]) * dy - (q[1] - a[1]) * dx).abs() / len;
+        if dev >= 0.05 {
+            simple.push(*q);
+        }
+    }
+    let length: f64 = simple
+        .windows(2)
+        .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+        .sum();
+    if simple.len() < 2 || length < 0.3 {
+        return Vec::new();
+    }
+    simple
 }
 
 /// One closed loop as a single path, so corners join cleanly.

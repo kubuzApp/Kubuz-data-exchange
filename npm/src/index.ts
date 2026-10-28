@@ -185,6 +185,39 @@ export type DrawingSheet = {
   views?: DrawingView[];
   /** Folded sheets: edges shorter than this were treated as reliefs. */
   minorBound?: number;
+  /** The sheet's page in the dossier, 0-based. */
+  page: number;
+  /** `laser` (cut only), `laser+bend` or `folded` (drawn from a folded view). */
+  route: "laser" | "laser+bend" | "folded";
+  /** The position this blank is the mirror image of. */
+  mirrorOf?: number;
+  /** Per piece, kg, when the material's density is known. */
+  weight?: number;
+  /** Outline plus holes, mm. */
+  cutLength?: number;
+  /** Net area of the blank, mm². */
+  area?: number;
+  holes?: number;
+};
+
+/** One section of the dossier's front matter and where it is. */
+export type DrawingList = {
+  kind: "cover" | "assembly" | "bom" | "laser" | "bend";
+  title: string;
+  /** First page, 0-based, and how many pages. */
+  page: number;
+  pages: number;
+};
+
+/** The assembly sheet: the isometric of every placed part with item balloons. */
+export type DrawingAssembly = {
+  page: number;
+  paper: "A3";
+  scale: string;
+  scaleFactor: number;
+  origin: [number, number];
+  bbox: [number, number, number, number];
+  balloons: { pos: number; at: [number, number]; anchor: [number, number] }[];
 };
 
 export type DrawingsResult =
@@ -192,7 +225,12 @@ export type DrawingsResult =
       ok: true;
       /** The PDF/A-2b file, base64. */
       pdf: string;
+      /** The sheets in dossier order: positions follow the production route. */
       sheets: DrawingSheet[];
+      /** Cover, assembly and parts list, laser list, bend list. */
+      lists: DrawingList[];
+      /** `null` when no part folds or places. */
+      assembly: DrawingAssembly | null;
       skipped: { id: string; message: string }[];
       /** The PDF as bytes, for a Blob or a file. */
       pdfBytes: () => Uint8Array;

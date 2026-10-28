@@ -33,6 +33,22 @@ its own reader, and never trusts the report for a fact it can check:
 * no two texts overlap, and no line runs through a text;
 * the file stays small: 25 KB plus 6 KB a page.
 
+The front matter (`lists` in the report) is judged too:
+
+* the page count is the sheets plus the lists' pages, every list page is
+  an A4 sheet (the assembly an A3), free of collisions;
+* the parts list prints every sheet's position, quantity, flat size,
+  folded size and weight, and every balloon on the assembly is its
+  position number drawn where the report says;
+* the laser list prints every blank's cut length as the judge sums it
+  from the DXF (lines, arcs and circles) and its number of holes as the
+  judge counts the closed CUT loops;
+* the bend list prints every bend's angle, inside radius and the length
+  of its DXF bend line;
+* every link annotation is printable and points at a page; every sheet
+  links back to the parts list, and every row of the parts list links to
+  its sheet.
+
 A folded sheet (kind "folded" in the report) is judged against the view
 JSON the dossier was drawn from, `<views>/<name>.view.json`, instead:
 
@@ -1082,6 +1098,210 @@ def folded_problems(sheet, view, words):
     return problems
 
 
+# --- Front matter -------------------------------------------------------------
+
+
+def kg_text(w):
+    """A weight as the lists print it."""
+    v = round(w, 1) if w >= 10.0 else round(w, 2)
+    s = f"{v:.2f}".rstrip("0").rstrip(".")
+    return s.replace(".", ",")
+
+
+def dxf_cut_length(d):
+    total = 0.0
+    for a, b in d["lines"]:
+        total += math.hypot(b[0] - a[0], b[1] - a[1])
+    for c, r, s, e in d["arcs"]:
+        sweep = (e - s) % 360.0
+        if sweep < 1e-9:
+            sweep = 360.0
+        total += r * math.radians(sweep)
+    for c, r in d["circles"]:
+        total += 2.0 * math.pi * r
+    return total
+
+
+def dxf_hole_count(d):
+    """Closed CUT loops besides the outline: circles plus the chains of
+    lines and arcs."""
+    nodes = []
+
+    def node(p):
+        for i, q in enumerate(nodes):
+            if abs(q[0] - p[0]) < 1e-3 and abs(q[1] - p[1]) < 1e-3:
+                return i
+        nodes.append(p)
+        return len(nodes) - 1
+
+    parent = {}
+
+    def find(i):
+        while parent.get(i, i) != i:
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+
+    ends = []
+    for a, b in d["lines"]:
+        ends.append((node(a), node(b)))
+    for c, r, s, e in d["arcs"]:
+        ends.append((node(arc_point(c, r, s)), node(arc_point(c, r, e))))
+    for i in range(len(nodes)):
+        parent.setdefault(i, i)
+    for i, j in ends:
+        union(i, j)
+    chains = len({find(i) for i in range(len(nodes))})
+    return len(d["circles"]) + max(chains - 1, 0)
+
+
+def link_problems(path, report):
+    """Every Link annotation is printable and points at a page; every
+    sheet links to the parts list and every parts list row to its sheet."""
+    out = []
+    lists = {l["kind"]: l for l in report.get("lists", [])}
+    bom_pages = set()
+    for kind in ("assembly", "bom"):
+        if kind in lists:
+            l = lists[kind]
+            bom_pages.update(range(l["page"], l["page"] + l["pages"]))
+    sheet_pages = {s["page"] for s in report["sheets"]}
+    with pikepdf.open(path) as pdf:
+        ids = [p.objgen for p in pdf.pages]
+        targets = {i: set() for i in range(len(ids))}
+        for i, page in enumerate(pdf.pages):
+            for a in page.get("/Annots", []):
+                if a.get("/Subtype") != "/Link":
+                    out.append(f"page {i + 1}: {a.get('/Subtype')} annotation")
+                    continue
+                if int(a.get("/F", 0)) != 4:
+                    out.append(f"page {i + 1}: link without the Print flag")
+                dest = a.get("/Dest")
+                if dest is None or dest[0].objgen not in ids:
+                    out.append(f"page {i + 1}: link to nowhere")
+                    continue
+                targets[i].add(ids.index(dest[0].objgen))
+    if bom_pages:
+        for s in report["sheets"]:
+            if not targets[s["page"]] & bom_pages:
+                out.append(f"page {s['page'] + 1}: no link back to the parts list")
+        linked = set()
+        for p in bom_pages:
+            linked |= targets[p]
+        for s in report["sheets"]:
+            if s["page"] not in linked:
+                out.append(f"parts list: no link to page {s['page'] + 1} ({s['title']})")
+    return out
+
+
+def list_problems(doc, report, dxf_dir, prob):
+    """The front matter against the sheets and the DXF files."""
+    lists = report.get("lists", [])
+    by_kind = {}
+    for l in lists:
+        by_kind.setdefault(l["kind"], []).append(l)
+    texts_of = {}
+    for l in lists:
+        want = "A3" if l["kind"] == "assembly" else "A4"
+        for k in range(l["pages"]):
+            idx = l["page"] + k
+            if idx >= doc.page_count:
+                prob(f"{l['kind']}: page {idx + 1} missing")
+                continue
+            page = doc[idx]
+            tag = f"page {idx + 1} ({l['kind']})"
+            w, h = page.rect.width * PT, page.rect.height * PT
+            ww, hh = SHEETS[want]
+            if abs(w - ww) > 0.5 or abs(h - hh) > 0.5:
+                prob(f"{tag}: {w:.1f} × {h:.1f} mm is not {want}")
+            texts = page_texts(page)
+            texts_of[idx] = texts
+            collision_problems(page, texts, prob, tag)
+
+    def words_on(kinds):
+        ws = set()
+        for kind in kinds:
+            for l in by_kind.get(kind, []):
+                for k in range(l["pages"]):
+                    for t, *_ in texts_of.get(l["page"] + k, []):
+                        ws.add(t)
+        return ws
+
+    # The parts list.
+    bom = words_on(("assembly", "bom"))
+    if bom:
+        for s in report["sheets"]:
+            tag = f"parts list ({s['title']})"
+            for want in (str(s["index"]), str(s["quantity"])):
+                if want not in bom:
+                    prob(f"{tag}: {want!r} not printed")
+            if s.get("kind") == "flat":
+                want = f"{mm_text(s['blank'][0])} × {mm_text(s['blank'][1])}"
+                if want not in bom:
+                    prob(f"{tag}: flat size {want!r} not printed")
+            size = s.get("extents") or s.get("size")
+            if size:
+                want = " × ".join(mm_text(v) for v in size)
+                if want not in bom:
+                    prob(f"{tag}: folded size {want!r} not printed")
+            if s.get("weight") is not None and kg_text(s["weight"]) not in bom:
+                prob(f"{tag}: weight {kg_text(s['weight'])!r} not printed")
+    # Balloons.
+    asm = report.get("assembly")
+    if asm:
+        texts = texts_of.get(asm["page"], [])
+        for b in asm["balloons"]:
+            at = b["at"]
+            hit = any(
+                t == str(b["pos"]) and abs((box[0] + box[2]) / 2 - at[0]) < 3.0 and abs((box[1] + box[3]) / 2 - at[1]) < 3.0
+                for t, box, *_ in texts
+            )
+            if not hit:
+                prob(f"assembly: balloon {b['pos']} not drawn at ({at[0]:.1f}, {at[1]:.1f})")
+        seen = {b["pos"] for b in asm["balloons"]}
+        for s in report["sheets"]:
+            if s.get("kind") == "flat" and s["index"] not in seen:
+                prob(f"assembly: no balloon for pos {s['index']} ({s['title']})")
+    # The laser list.
+    laser = words_on(("laser",))
+    bend = words_on(("bend",))
+    for s in report["sheets"]:
+        if s.get("kind") != "flat":
+            continue
+        try:
+            d = read_dxf(os.path.join(dxf_dir, s["partIds"][0] + ".dxf"))
+        except OSError:
+            continue
+        tag = f"laser list ({s['title']})"
+        if laser:
+            cut = mm_text(dxf_cut_length(d))
+            if cut not in laser:
+                prob(f"{tag}: cut length {cut!r} not printed")
+            holes = str(dxf_hole_count(d))
+            if holes not in laser:
+                prob(f"{tag}: {holes} holes not printed")
+            if s.get("cutLength") is not None and abs(s["cutLength"] - dxf_cut_length(d)) > 0.05:
+                prob(f"{tag}: report cut length {s['cutLength']:.2f} is not the DXF's {dxf_cut_length(d):.2f}")
+        if s.get("bends"):
+            if not bend:
+                prob(f"bend list missing for {s['title']}")
+                continue
+            tag = f"bend list ({s['title']})"
+            for b in s["bends"]:
+                for want in (f"{mm_text(b['angleDeg'])}°", mm_text(b["insideRadius"]), mm_text(b["allowance"])):
+                    if want not in bend:
+                        prob(f"{tag}: bend {b['nr']}: {want!r} not printed")
+            for a, bb in d["bends"]:
+                want = mm_text(math.hypot(bb[0] - a[0], bb[1] - a[1]))
+                if want not in bend:
+                    prob(f"{tag}: bend length {want!r} not printed")
+    for s in report["sheets"]:
+        if not bend and s.get("bends") and s.get("kind") == "flat":
+            prob(f"bend list missing for {s['title']}")
+
+
 def judge(path, dxf_root, jar, views_root=None):
     out = {"file": path, "ok": True, "problems": []}
     prob = out["problems"].append
@@ -1100,10 +1320,14 @@ def judge(path, dxf_root, jar, views_root=None):
     out["bytes"] = size
     if size > SIZE_BASE + SIZE_PER_PAGE * doc.page_count:
         prob(f"{size} bytes for {doc.page_count} page(s)")
-    if doc.page_count != len(report["sheets"]):
-        prob(f"{doc.page_count} pages for {len(report['sheets'])} sheets")
+    front = sum(l["pages"] for l in report.get("lists", []))
+    if doc.page_count != len(report["sheets"]) + front:
+        prob(f"{doc.page_count} pages for {len(report['sheets'])} sheets and {front} list pages")
     for p in structure_problems(path):
         prob(p)
+    for p in link_problems(path, report):
+        prob(p)
+    list_problems(doc, report, dxf_dir, prob)
     if jar:
         v = verapdf(jar, path)
         if v:
@@ -1111,7 +1335,8 @@ def judge(path, dxf_root, jar, views_root=None):
         else:
             out["pdfa"] = "2b"
 
-    for idx, sheet in enumerate(report["sheets"]):
+    for sheet in report["sheets"]:
+        idx = sheet.get("page", 0)
         if idx >= doc.page_count:
             break
         page = doc[idx]

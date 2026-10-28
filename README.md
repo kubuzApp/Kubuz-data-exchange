@@ -202,8 +202,24 @@ looks from. Slits between flanges and the relief corners of a bend are
 
 Numbers are written to a tenth with a decimal comma and no trailing zero
 (`45,5`, `36`). The notes are in Dutch, English or French (`language`).
-The dossier has bookmarks and page labels (`Pos 1`, `Pos 2`, …), and it is
-small: about 20 KB for the font and 1 to 3 KB a sheet, fully vector.
+The dossier follows the material through the workshop. It opens with a
+**cover** (title, number, revision, customer, date, the totals per
+material and thickness, and a table of contents whose rows are links),
+then the **assembly sheet** on A3: every part folded and placed as the view
+places it, as one isometric with hidden lines removed and an item balloon
+(ISO 6433) per position, with the **parts list** (ISO 7573) beside it:
+position, quantity, description, material, thickness, flat size, folded
+size and weight. Then the **laser list** per material and thickness (flat
+size, cut length, holes, net area, weight per piece and in total) and the
+**bend list** per tool (thickness and inside radius: every bend's angle,
+direction, radius, allowance and length). The part sheets come last, in
+production order: laser only first, then laser and bending, by material,
+thickness and tool; the position numbers follow that order. A mirrored
+part gets a sheet of its own that says which position it mirrors. Every
+parts list row links to its sheet and every sheet's title block links
+back; the dossier has bookmarks and page labels (`Voorblad`, `Pos 1`,
+`Pos 2`, …), and it is small: about 20 KB for the font and 1 to 3 KB a
+sheet, fully vector.
 
 Besides the file the export describes every sheet (`sheets`): its kind
 (`flat` or `folded`), paper, scale, where the blank sits, material, every
@@ -211,8 +227,11 @@ chain with its stations and the features that put them there, every section
 with its cut and the pieces it shows, the folded extents, where the
 isometric sits, and, for a folded sheet, each view's frame and origin in
 part coordinates, so an outside judge can rebuild the part from the drawing
-alone. Parts that cannot be drawn (a mesh, a
-mirrored folded part) are listed under `skipped`.
+alone, plus its page, route, weight, cut length, net area and hole count.
+`lists` says where the cover, the assembly, the parts list, the laser list
+and the bend list are, and `assembly` where the isometric sits and where
+every balloon points. Parts that cannot be drawn (a mesh, a mirrored
+folded part) are listed under `skipped`.
 
 From the command line:
 
@@ -331,7 +350,13 @@ and angles match the DXF cut (outside length = flat length plus the bend
 allowance of the thickness band), the folded extents match the folded
 fixture, no two texts overlap (measured with the embedded font's advances),
 no line runs through a text, the file stays under 25 KB plus 6 KB a page,
-and veraPDF passes it as PDF/A-2b. A folded sheet
+and veraPDF passes it as PDF/A-2b. The front matter is judged the same
+way: the parts list prints every sheet's position, quantity, sizes and
+weight, every balloon is drawn where the report says, the laser list's cut
+lengths and hole counts are what the judge sums and counts from the DXF,
+the bend list carries every bend's angle, radius and DXF line length, and
+every link annotation points at a page, every sheet back at the parts list
+and every parts list row at its sheet. A folded sheet
 is judged against the view it was drawn from (`--views`): every ordinate
 is, in its view's frame, a vertex, a hole centre, a circle's extreme, a
 cylinder's silhouette or the corner of two edge-on faces; every chain runs

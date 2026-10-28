@@ -13,17 +13,19 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::dxf::{blank, Skipped};
 use crate::pdf::{Doc, DocInfo};
-use crate::view::{Pose, View};
+use crate::view::{Pose, View, P3};
 
+pub mod assembly;
 pub mod dims;
 pub mod features;
 pub mod flat;
 pub mod folded;
 pub mod iso;
+pub mod lists;
 pub mod logo;
 pub mod project;
 pub mod running;
@@ -94,15 +96,22 @@ pub struct DrawingsExport {
     pub pdf: Vec<u8>,
     pub sheets: Vec<SheetReport>,
     pub skipped: Vec<Skipped>,
+    /// The front matter: cover, assembly, parts list, laser list, bend
+    /// list, with their pages.
+    pub lists: Vec<ListReport>,
+    pub assembly: Option<assembly::AssemblyReport>,
 }
 
 impl DrawingsExport {
-    /// `{ "ok": true, "pdf": "<base64>", "sheets": [...], "skipped": [...] }`.
+    /// `{ "ok": true, "pdf": "<base64>", "sheets": [...], "lists": [...],
+    /// "assembly": {...}, "skipped": [...] }`.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "ok": true,
             "pdf": base64(&self.pdf),
             "sheets": self.sheets,
+            "lists": self.lists,
+            "assembly": self.assembly,
             "skipped": self.skipped.iter().map(|s| serde_json::json!({
                 "id": s.id, "message": s.message,
             })).collect::<Vec<_>>(),
@@ -110,8 +119,23 @@ impl DrawingsExport {
     }
 }
 
-/// The dossier of every sheet part in `view`. Parts that share a solid
-/// and a pose kind share one sheet; its `partIds` say how many to make.
+/// One section of the dossier's front matter and where it is.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListReport {
+    /// `cover`, `assembly`, `bom`, `laser` or `bend`.
+    pub kind: String,
+    pub title: String,
+    /// First page, 0-based, and how many pages.
+    pub page: usize,
+    pub pages: usize,
+}
+
+/// The dossier of every sheet part in `view`: a cover, the assembly with
+/// its parts list, the laser list, the bend list, then a sheet per
+/// distinct blank in production order (laser only, then laser and
+/// bending, by material and thickness). Parts that share a solid and a
+/// pose kind share one sheet; its `partIds` say how many to make.
 pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String> {
     if view.units != "mm" {
         return Err(format!("view units are {}, only mm is drawn", view.units));
@@ -138,6 +162,8 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         scale: f64,
         material: String,
         thickness: f64,
+        matrix: [P3; 3],
+        position: P3,
     }
     let parts: Vec<PartRef> = if view.parts.is_empty() {
         view.solids
@@ -149,6 +175,8 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 scale: 1.0,
                 material: String::new(),
                 thickness: 0.0,
+                matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                position: [0.0; 3],
             })
             .collect()
     } else {
@@ -171,6 +199,8 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 scale,
                 material: p.material.clone(),
                 thickness: p.thickness * scale,
+                matrix: p.rows(),
+                position: p.position,
             });
         }
         v
@@ -181,8 +211,12 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         part_ids: Vec<String>,
         blank: Option<blank::Blank>,
         solid: usize,
+        mirror: bool,
+        scale: f64,
         material: String,
         thickness: f64,
+        /// Instances: placement of each part.
+        placed: Vec<([P3; 3], P3)>,
     }
     let mut groups: Vec<Group> = Vec::new();
     let mut by_blank: HashMap<(String, bool, i64), usize> = HashMap::new();
@@ -191,6 +225,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         let key = (p.solid.clone(), p.mirror, (p.scale * 1e9).round() as i64);
         if let Some(&i) = by_blank.get(&key) {
             groups[i].part_ids.push(p.id);
+            groups[i].placed.push((p.matrix, p.position));
             continue;
         }
         let Some(si) = view.solids.iter().position(|s| s.id == p.solid) else {
@@ -210,8 +245,11 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 part_ids: vec![p.id],
                 blank: None,
                 solid: si,
+                mirror: false,
+                scale: 1.0,
                 material: p.material,
                 thickness: p.thickness,
+                placed: vec![(p.matrix, p.position)],
             });
             continue;
         }
@@ -222,8 +260,11 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                     part_ids: vec![p.id],
                     blank: Some(b),
                     solid: si,
+                    mirror: p.mirror,
+                    scale: p.scale,
                     material: p.material,
                     thickness: p.thickness,
+                    placed: vec![(p.matrix, p.position)],
                 });
             }
             Err(message) => skipped.push(Skipped {
@@ -243,11 +284,157 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         ));
     }
 
-    let title = if meta.title.is_empty() {
-        lang.t("dossier").to_string()
-    } else {
-        meta.title.clone()
+    // Production order: laser only, then laser and bending, then parts
+    // from a folded view; within that by material, thickness and the
+    // bend tool, then as the view lists them.
+    let route_of = |g: &Group| match &g.blank {
+        None => lists::Route::Folded,
+        Some(b) if b.bends.is_empty() => lists::Route::Laser,
+        Some(_) => lists::Route::LaserBend,
     };
+    let mut order: Vec<usize> = (0..groups.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (ga, gb) = (&groups[a], &groups[b]);
+        let tool = |g: &Group| {
+            g.blank
+                .as_ref()
+                .map(|bl| {
+                    bl.bends
+                        .iter()
+                        .map(|x| x.inside_radius)
+                        .fold(f64::INFINITY, f64::min)
+                })
+                .unwrap_or(f64::INFINITY)
+        };
+        route_of(ga)
+            .cmp(&route_of(gb))
+            .then(ga.material.to_lowercase().cmp(&gb.material.to_lowercase()))
+            .then(ga.thickness.total_cmp(&gb.thickness))
+            .then(tool(ga).total_cmp(&tool(gb)))
+            .then(a.cmp(&b))
+    });
+    let mut pos_of = vec![0usize; groups.len()];
+    for (k, &g) in order.iter().enumerate() {
+        pos_of[g] = k + 1;
+    }
+    let mirror_of = |g: &Group| -> Option<usize> {
+        if !g.mirror {
+            return None;
+        }
+        groups
+            .iter()
+            .position(|o| o.solid == g.solid && !o.mirror && (o.scale - g.scale).abs() < 1e-9)
+            .map(|i| pos_of[i])
+    };
+
+    // The rows of the lists, in position order, with what the lists say.
+    let mut rows: Vec<lists::Row> = Vec::new();
+    for &gi in &order {
+        let g = &groups[gi];
+        let mut row = lists::Row {
+            pos: pos_of[gi],
+            id: g.part_ids[0].clone(),
+            part_ids: g.part_ids.clone(),
+            material: g.material.clone(),
+            thickness: g.thickness,
+            blank: None,
+            folded: None,
+            weight: None,
+            cut_length: None,
+            area: None,
+            holes: None,
+            bends: Vec::new(),
+            route: route_of(g),
+            mirror_of: mirror_of(g),
+            page: 0,
+        };
+        if let Some(b) = &g.blank {
+            let f = features::features(b);
+            row.blank = Some(b.max);
+            row.folded = section::folded_extents(b, g.thickness);
+            row.weight = flat::weight(b, &f, g.thickness, &g.material, meta);
+            row.cut_length = Some(b.loops.iter().flatten().map(features::seg_len).sum::<f64>());
+            row.area = Some(flat::net_area(&f));
+            row.holes = Some(b.loops.len().saturating_sub(1));
+            row.bends = b
+                .bends
+                .iter()
+                .enumerate()
+                .map(|(i, x)| lists::BendRow {
+                    nr: i + 1,
+                    angle_deg: x.angle_deg,
+                    direction: x.direction,
+                    inside_radius: x.inside_radius,
+                    allowance: x.allowance,
+                    length: (x.b[0] - x.a[0]).hypot(x.b[1] - x.a[1]),
+                })
+                .collect();
+        }
+        rows.push(row);
+    }
+
+    // The assembly picture, when the parts fold and place.
+    let mut instances = Vec::new();
+    for (k, &gi) in order.iter().enumerate() {
+        let g = &groups[gi];
+        if let Some(b) = &g.blank {
+            for (m, p) in &g.placed {
+                instances.push(assembly::Instance {
+                    row: k,
+                    blank: b,
+                    thickness: g.thickness,
+                    matrix: *m,
+                    position: *p,
+                });
+            }
+        }
+    }
+    let scene = assembly::scene(&instances);
+
+    // Page plan: cover, assembly (+ parts list overflow), laser list,
+    // bend list, then the sheets.
+    let bom = lists::bom_table(&rows, lang);
+    let laser = lists::laser_table(&rows, lang);
+    let bend = lists::bend_table(&rows, lang);
+    let laser_notes = [lang.t("laser_note")];
+    let bend_notes = [lang.t("bend_list_note")];
+    let bom_notes = [lang.t("balloon_note"), lang.t("order_note")];
+    let a3_cap = {
+        let (_, area) = lists::begin(sheet::Paper::A3, lang, "", "", &bom_notes);
+        lists::Table::capacity(area[3] - area[1])
+    };
+    let a4_cap = {
+        let (_, area) = lists::begin(sheet::Paper::A4, lang, "", "", &bom_notes);
+        lists::Table::capacity(area[3] - area[1])
+    };
+    let bom_ranges = if scene.is_some() {
+        bom.split(a3_cap, a4_cap)
+    } else {
+        bom.split(a4_cap, a4_cap)
+    };
+    let has_cut = rows.iter().any(|r| r.blank.is_some());
+    let has_bends = rows.iter().any(|r| !r.bends.is_empty());
+    let laser_pages = if has_cut {
+        lists::table_page_count(&laser, lang, &laser_notes)
+    } else {
+        0
+    };
+    let bend_pages = if has_bends {
+        lists::table_page_count(&bend, lang, &bend_notes)
+    } else {
+        0
+    };
+    let cover_page = 0;
+    let assembly_page = 1;
+    let laser_page = assembly_page + bom_ranges.len();
+    let bend_page = laser_page + laser_pages;
+    let first_sheet = bend_page + bend_pages;
+    let pages = first_sheet + groups.len();
+    for (k, row) in rows.iter_mut().enumerate() {
+        row.page = first_sheet + k;
+    }
+
+    let title = lists::dossier_title(meta, lang);
     let mut doc = Doc::new(DocInfo {
         title: title.clone(),
         author: meta.owner.clone(),
@@ -260,39 +447,191 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         let form = sheet::frame_form(paper, lang, meta.logo.as_ref(), &meta.owner, &meta.address)?;
         doc.add_form(paper.form_name(), w, h, form);
     }
-    let total = groups.len();
-    let mut sheets = Vec::with_capacity(total);
-    for (i, g) in groups.iter().enumerate() {
+    for _ in 0..first_sheet {
+        doc.reserve_page();
+    }
+
+    // The sheets first: they know their folded sizes.
+    let mut sheets = Vec::with_capacity(groups.len());
+    for (k, &gi) in order.iter().enumerate() {
+        let g = &groups[gi];
         let info = flat::SheetInfo {
-            index: i + 1,
-            total,
+            index: pos_of[gi],
+            total: groups.len(),
+            page: first_sheet + k,
+            pages,
             title: &g.part_ids[0],
             part_ids: &g.part_ids,
             material: &g.material,
             thickness: g.thickness,
+            mirror_of: rows[k].mirror_of,
+            bom_page: Some(assembly_page),
         };
-        let report = match &g.blank {
+        let mut report = match &g.blank {
             Some(b) => flat::sheet(&mut doc, b, &info, meta, lang),
             None => folded::sheet(&mut doc, &view.solids[g.solid], &info, meta, lang),
         }
         .map_err(|e| format!("part {}: {e}", g.part_ids[0]))?;
-        let name = if g.part_ids.len() > 1 {
-            format!(
-                "{} · {} ({}×)",
-                report.label,
-                g.part_ids[0],
-                g.part_ids.len()
-            )
-        } else {
-            format!("{} · {}", report.label, g.part_ids[0])
-        };
-        doc.add_outline(&[lang.t("details")], &name, doc.page_count() - 1);
+        report.page = first_sheet + k;
+        report.route = rows[k].route.name().into();
+        report.mirror_of = rows[k].mirror_of;
+        report.weight = rows[k].weight;
+        report.cut_length = rows[k].cut_length;
+        report.area = rows[k].area;
+        report.holes = rows[k].holes;
+        if rows[k].folded.is_none() {
+            rows[k].folded = report.size;
+        }
         sheets.push(report);
+    }
+    debug_assert_eq!(doc.page_count(), pages);
+
+    // Front matter into the reserved pages.
+    let bom = lists::bom_table(&rows, lang);
+    let mut lists_report = Vec::new();
+    lists_report.push(ListReport {
+        kind: "cover".into(),
+        title: lang.t("cover_title").into(),
+        page: cover_page,
+        pages: 1,
+    });
+    let mut assembly_report = None;
+    match &scene {
+        Some((iso, owner_row)) => {
+            let r = assembly::sheet(
+                &mut doc,
+                assembly_page,
+                pages,
+                meta,
+                lang,
+                &rows,
+                iso,
+                owner_row,
+                &bom,
+                bom_ranges[0].clone(),
+            );
+            assembly_report = Some(r);
+            lists_report.push(ListReport {
+                kind: "assembly".into(),
+                title: lang.t("assembly_title").into(),
+                page: assembly_page,
+                pages: 1,
+            });
+            // Overflow of the parts list on A4.
+            for (k, r) in bom_ranges.iter().enumerate().skip(1) {
+                let page = assembly_page + k;
+                let caption = format!("{} ({})", lang.t("bom"), lang.t("continued"));
+                let (mut c, area) = lists::begin(sheet::Paper::A4, lang, &caption, "", &bom_notes);
+                let x = area[0] + (area[2] - area[0] - bom.width()) / 2.0;
+                bom.draw(&mut c, &mut doc, page, x.max(area[0]), area[3], r.clone());
+                lists::finish(
+                    &mut doc,
+                    page,
+                    sheet::Paper::A4,
+                    lang,
+                    meta,
+                    c,
+                    lang.t("bom_title"),
+                    "-",
+                    pages,
+                    &format!("{} {}", lang.t("bom_title"), k + 1),
+                );
+            }
+            if bom_ranges.len() > 1 {
+                lists_report.push(ListReport {
+                    kind: "bom".into(),
+                    title: lang.t("bom_title").into(),
+                    page: assembly_page + 1,
+                    pages: bom_ranges.len() - 1,
+                });
+            }
+        }
+        None => {
+            let n = assembly::bom_only(&mut doc, assembly_page, pages, meta, lang, &bom);
+            debug_assert_eq!(n, bom_ranges.len());
+            lists_report.push(ListReport {
+                kind: "bom".into(),
+                title: lang.t("bom_title").into(),
+                page: assembly_page,
+                pages: n,
+            });
+        }
+    }
+    if has_cut {
+        lists::table_pages(
+            &mut doc,
+            laser_page,
+            pages,
+            meta,
+            lang,
+            &laser,
+            lang.t("laser_list"),
+            lang.t("laser_title"),
+            &laser_notes,
+        );
+        lists_report.push(ListReport {
+            kind: "laser".into(),
+            title: lang.t("laser_title").into(),
+            page: laser_page,
+            pages: laser_pages,
+        });
+    }
+    if has_bends {
+        lists::table_pages(
+            &mut doc,
+            bend_page,
+            pages,
+            meta,
+            lang,
+            &bend,
+            lang.t("bend_list"),
+            lang.t("bend_title"),
+            &bend_notes,
+        );
+        lists_report.push(ListReport {
+            kind: "bend".into(),
+            title: lang.t("bend_title").into(),
+            page: bend_page,
+            pages: bend_pages,
+        });
+    }
+    let mut sections: Vec<(String, usize, usize)> = lists_report
+        .iter()
+        .filter(|l| l.kind != "cover")
+        .map(|l| (l.title.clone(), l.page, l.page + l.pages - 1))
+        .collect();
+    sections.push((lang.t("details").into(), first_sheet, pages - 1));
+    lists::cover(
+        &mut doc,
+        cover_page,
+        pages,
+        meta,
+        lang,
+        &lists::CoverInfo {
+            rows: &rows,
+            sections,
+        },
+    );
+
+    // Bookmarks: the front matter, then every sheet under "details".
+    for l in &lists_report {
+        doc.add_outline(&[], &l.title, l.page);
+    }
+    for (k, s) in sheets.iter().enumerate() {
+        let g = &groups[order[k]];
+        let name = if g.part_ids.len() > 1 {
+            format!("{} · {} ({}×)", s.label, g.part_ids[0], g.part_ids.len())
+        } else {
+            format!("{} · {}", s.label, g.part_ids[0])
+        };
+        doc.add_outline(&[lang.t("details")], &name, s.page);
     }
     Ok(DrawingsExport {
         pdf: doc.finish(),
         sheets,
         skipped,
+        lists: lists_report,
+        assembly: assembly_report,
     })
 }
 

@@ -1601,6 +1601,7 @@ mod tests {
             bends: vec![],
             min: [0.0, 0.0],
             max: [50.0, 30.0],
+            ..Default::default()
         };
         let f = super::super::features::features(&blank);
         let lo = layout(&f, &[], 1.0, Lang::Nl);
