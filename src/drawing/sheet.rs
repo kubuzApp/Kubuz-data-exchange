@@ -245,18 +245,29 @@ pub struct TitleValues {
     pub extents: String,
 }
 
+/// Where a captioned cell's value starts: after its caption in `lang`,
+/// never before the column's usual value position.
+fn value_x(cell: &Cell, lang: Lang) -> f64 {
+    if !cell.caption || cell.centre {
+        return cell.vx;
+    }
+    let caption = font::width(&format!("{}:", lang.t(cell.key)), LABEL_H);
+    cell.vx.max(1.0 + caption + 1.5)
+}
+
 /// Write the values of one page.
 pub fn title_values(c: &mut Content, paper: Paper, lang: Lang, v: &TitleValues) {
     let (bx, by) = paper.title_block();
     let put = |c: &mut Content, key: &str, text: &str| {
         let cell = cell(key);
+        let vx = value_x(&cell, lang);
         let room = if cell.centre {
             cell.w - 2.0
         } else {
-            cell.w - cell.vx - 1.0
+            cell.w - vx - 1.0
         };
         let (t, h) = shrink_to(text, cell.vh, room);
-        let x = bx + cell.x + cell.vx;
+        let x = bx + cell.x + vx;
         let y = by + cell.y + cell.vy;
         if cell.centre {
             c.text_centred(x, y, h, &t);
@@ -454,8 +465,8 @@ pub fn frame_form(
     Ok(c)
 }
 
-/// `text` at height `h`, or smaller (never under 1,8 mm), or cut with an
-/// ellipsis, so it fits `w` mm.
+/// `text` at height `h`, or smaller (never under 1,8 mm), or cut with
+/// three dots, so it fits `w` mm.
 pub fn shrink_to(text: &str, h: f64, w: f64) -> (String, f64) {
     let width = font::width;
     let mut h = h;
@@ -466,10 +477,11 @@ pub fn shrink_to(text: &str, h: f64, w: f64) -> (String, f64) {
         return (text.to_string(), h);
     }
     let mut s: String = text.to_string();
-    while !s.is_empty() && width(&format!("{s}…"), h) > w {
+    // The font subset has no ellipsis glyph; three dots read the same.
+    while !s.is_empty() && width(&format!("{s}..."), h) > w {
         s.pop();
     }
-    (format!("{s}…"), h)
+    (format!("{}...", s.trim_end()), h)
 }
 
 #[cfg(test)]
@@ -509,7 +521,26 @@ mod tests {
     fn long_values_shrink_then_truncate() {
         let (t, h) = shrink_to("1.4301 (X5CrNi18-10) EN 10088-2 2B", 3.5, 28.0);
         assert!(h < 3.5);
-        assert!(t.ends_with('…') || t.len() == 34);
+        assert!(t.ends_with("...") || t.len() == 34);
         assert_eq!(shrink_to("A4", 3.5, 28.0), ("A4".to_string(), 3.5));
+        let (cut, _) = shrink_to("mdf_moisture_resistant_board_of_eighteen", 2.5, 20.0);
+        assert!(cut.ends_with("..."), "{cut}");
+        assert!(cut.chars().all(font::has), "{cut}");
+    }
+
+    #[test]
+    fn values_start_after_their_caption_in_every_language() {
+        for lang in [Lang::Nl, Lang::En, Lang::Fr] {
+            for cell in cells().iter().filter(|c| c.caption && !c.centre) {
+                let caption = font::width(&format!("{}:", lang.t(cell.key)), LABEL_H);
+                assert!(
+                    value_x(cell, lang) >= 1.0 + caption + 1.0,
+                    "{} in {lang:?}",
+                    cell.key
+                );
+            }
+        }
+        let nl = cell("approved_date");
+        assert!(value_x(&nl, Lang::Nl) > VALUE_X[0]);
     }
 }
