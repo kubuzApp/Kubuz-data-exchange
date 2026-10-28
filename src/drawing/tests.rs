@@ -50,7 +50,8 @@ fn every_folded_fixture_becomes_a_sheet_with_views_and_bends() {
         ("roll_tube", 0, 3),
     ] {
         let out = write_drawings(&view(name), &Meta::default()).unwrap();
-        let s = &out.sheets[0];
+        let first = view(name).parts[0].id.clone();
+        let s = out.sheets.iter().find(|s| s.title == first).unwrap();
         assert_eq!(s.kind, "folded", "{name}");
         assert_eq!(s.bends.len(), bends, "{name}");
         assert_eq!(
@@ -137,4 +138,76 @@ fn the_json_result_carries_the_pdf_in_base64() {
     assert_eq!(v["ok"], true);
     assert!(v["pdf"].as_str().unwrap().starts_with("JVBERi0xLjc"));
     assert_eq!(v["sheets"][0]["label"], "Pos 1");
+}
+
+#[test]
+fn the_dossier_opens_with_cover_assembly_and_lists_in_production_order() {
+    let out = write_drawings(&view("deck_splash_flat"), &Meta::default()).unwrap();
+    let kinds: Vec<&str> = out.lists.iter().map(|l| l.kind.as_str()).collect();
+    assert_eq!(kinds, ["cover", "assembly", "laser", "bend"]);
+    let first_sheet = out.lists.iter().map(|l| l.page + l.pages).max().unwrap();
+    for (k, s) in out.sheets.iter().enumerate() {
+        assert_eq!(s.page, first_sheet + k, "{}", s.title);
+        assert_eq!(s.index, k + 1);
+    }
+    // Laser-only parts first, then the bent deck.
+    let routes: Vec<&str> = out.sheets.iter().map(|s| s.route.as_str()).collect();
+    assert_eq!(routes, ["laser", "laser", "laser+bend"]);
+    assert!(out
+        .sheets
+        .iter()
+        .all(|s| s.weight.is_some() && s.cut_length.is_some()));
+    // The assembly: a balloon per position, and the picture is the folded
+    // parts placed as the view places them: its extents on the picture
+    // plane match the folded fixture's vertices projected the same way.
+    let asm = out.assembly.expect("assembly");
+    let mut pos: Vec<usize> = asm.balloons.iter().map(|b| b.pos).collect();
+    pos.sort_unstable();
+    assert_eq!(pos, [1, 2, 3]);
+    let folded = view("deck_splash");
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for p in &folded.parts {
+        let m = p.rows();
+        let solid = folded.solids.iter().find(|s| s.id == p.solid).unwrap();
+        for v in &solid.vertices {
+            let w = [
+                m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2] + p.position[0],
+                m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2] + p.position[1],
+                m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2] + p.position[2],
+            ];
+            let (q, _) = super::iso::project(w);
+            for i in 0..2 {
+                lo[i] = lo[i].min(q[i]);
+                hi[i] = hi[i].max(q[i]);
+            }
+        }
+    }
+    let s = asm.scale_factor;
+    let drawn = [
+        (asm.bbox[2] - asm.bbox[0]) / s,
+        (asm.bbox[3] - asm.bbox[1]) / s,
+    ];
+    for i in 0..2 {
+        assert!(
+            (drawn[i] - (hi[i] - lo[i])).abs() < 4.0,
+            "axis {i}: drawn {} vs folded {}",
+            drawn[i],
+            hi[i] - lo[i]
+        );
+    }
+    // A mirrored part says which position it mirrors.
+    let out = write_drawings(&view("four_down_flat_mirrored"), &Meta::default()).unwrap();
+    let mirrored = out
+        .sheets
+        .iter()
+        .find(|s| s.mirror_of.is_some())
+        .expect("mirror");
+    let twin = out
+        .sheets
+        .iter()
+        .find(|s| s.index == mirrored.mirror_of.unwrap())
+        .unwrap();
+    assert_eq!(twin.blank, mirrored.blank);
+    assert!(out.pdf.len() < 25_000 + 6_000 * (out.sheets.len() + 4));
 }

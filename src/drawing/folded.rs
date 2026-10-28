@@ -941,6 +941,7 @@ fn plan_views(
             zones: vec![],
             min: [0.0, 0.0],
             max,
+            ..Default::default()
         };
         let mut feat = super::features::features(&blank);
         minor += feat.minor;
@@ -1276,6 +1277,7 @@ fn plan_views(
             zones: vec![],
             min: [0.0, 0.0],
             max,
+            ..Default::default()
         };
         let mut feat = super::features::features(&blank);
         minor += feat.minor;
@@ -1922,8 +1924,8 @@ pub fn sheet(
         description: meta.title.clone(),
         customer: meta.customer.clone(),
         quantity: info.part_ids.len(),
-        sheet: info.index,
-        sheets: info.total,
+        sheet: info.page + 1,
+        sheets: info.pages,
         designer: meta.created_by.clone(),
         date: meta.date.clone(),
         approved: meta.approved_by.clone(),
@@ -2283,7 +2285,10 @@ pub fn sheet(
 
     let (w, h) = paper.size();
     let label = format!("Pos {}", info.index);
-    doc.add_page(w, h, &[paper.form_name()], c, &label);
+    let page = doc.add_page(w, h, &[paper.form_name()], c, &label);
+    if let Some(bom) = info.bom_page {
+        doc.add_link(page, sheet::id_rect(paper), bom);
+    }
     Ok(SheetReport {
         chains: vec![],
         sections: vec![],
@@ -2307,5 +2312,12 @@ pub fn sheet(
         size: Some(bbox),
         views: view_reports,
         minor_bound: Some(minor_bound(solid)),
+        page: info.page,
+        route: String::new(),
+        mirror_of: info.mirror_of,
+        weight: None,
+        cut_length: None,
+        area: None,
+        holes: None,
     })
 }

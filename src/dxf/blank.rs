@@ -58,6 +58,36 @@ pub struct Zone {
     pub points: Vec<P2>,
 }
 
+/// Where the blank's plane sits in the solid it came from: blank
+/// `(x, y)` is `(dot(p, u) · sx · scale, dot(p, v) · scale) + shift` for
+/// a solid point `p`, and the outer skin is the plane `dot(p, n) = d`
+/// with `n` pointing out of the metal.
+#[derive(Clone, Copy, Debug)]
+pub struct Frame {
+    pub u: P3,
+    pub v: P3,
+    pub n: P3,
+    pub d: f64,
+    /// `-1` for a mirrored part.
+    pub sx: f64,
+    pub scale: f64,
+    pub shift: P2,
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Frame {
+            u: [1.0, 0.0, 0.0],
+            v: [0.0, 1.0, 0.0],
+            n: [0.0, 0.0, 1.0],
+            d: 0.0,
+            sx: 1.0,
+            scale: 1.0,
+            shift: [0.0, 0.0],
+        }
+    }
+}
+
 /// A flat pattern: closed loops of segments (the outline and the holes,
 /// all cut), the bend lines, and the zones the kernel cut the skin into.
 #[derive(Clone, Debug, Default)]
@@ -67,6 +97,24 @@ pub struct Blank {
     pub zones: Vec<Zone>,
     pub min: P2,
     pub max: P2,
+    pub frame: Frame,
+}
+
+impl Blank {
+    /// A point `[x, y, w]` of the blank (`w` along the skin's normal, in
+    /// the blank's scaled millimetres) back in the solid's own
+    /// coordinates.
+    pub fn to_solid(&self, p: P3) -> P3 {
+        let f = &self.frame;
+        let a = f.sx * (p[0] - f.shift[0]) / f.scale;
+        let b = (p[1] - f.shift[1]) / f.scale;
+        let c = f.d + p[2] / f.scale;
+        [
+            f.u[0] * a + f.v[0] * b + f.n[0] * c,
+            f.u[1] * a + f.v[1] * b + f.n[1] * c,
+            f.u[2] * a + f.v[2] * b + f.n[2] * c,
+        ]
+    }
 }
 
 /// The blank of `solid` seen from its outer skin. `mirror` flips it (a
@@ -175,8 +223,25 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
         }
     }
 
+    let d = outer
+        .iter()
+        .flat_map(|&fi| solid.faces[fi].loops.iter().flatten())
+        .filter_map(|le| solid.edges.get(le.edge))
+        .filter_map(|e| solid.vertices.get(e.start))
+        .map(|p| dot(*p, n))
+        .next()
+        .unwrap_or(0.0);
     let mut blank = Blank {
         loops,
+        frame: Frame {
+            u,
+            v,
+            n,
+            d,
+            sx: if mirror { -1.0 } else { 1.0 },
+            scale,
+            shift: [0.0, 0.0],
+        },
         ..Blank::default()
     };
     // The zones: each outer-skin face's outer loop, sampled on the blank.
@@ -340,6 +405,7 @@ impl Blank {
             }
         }
         let shift = [-lo[0], -lo[1]];
+        self.frame.shift = shift;
         let mv = |p: &mut P2| {
             p[0] += shift[0];
             p[1] += shift[1];

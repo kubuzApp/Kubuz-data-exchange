@@ -37,6 +37,16 @@ enum Object {
 struct Page {
     id: u32,
     label: String,
+    /// The page dictionary up to (not including) its closing `>>`; empty
+    /// while the page is only reserved.
+    dict: String,
+}
+
+/// An internal link: a rectangle on one page that jumps to another.
+struct Link {
+    from: usize,
+    rect: [f64; 4],
+    to: usize,
 }
 
 struct Outline {
@@ -54,6 +64,7 @@ pub struct Doc {
     pages: Vec<Page>,
     forms: Vec<(String, u32)>,
     outline: Vec<Outline>,
+    links: Vec<Link>,
 }
 
 impl Doc {
@@ -67,6 +78,7 @@ impl Doc {
             pages: Vec::new(),
             forms: Vec::new(),
             outline: Vec::new(),
+            links: Vec::new(),
         };
         doc.pages_id = doc.alloc();
         doc.resources_id = doc.alloc();
@@ -167,8 +179,34 @@ impl Doc {
         forms: &[&str],
         content: Content,
         label: &str,
-    ) {
+    ) -> usize {
+        let i = self.reserve_page();
+        self.fill_page(i, w_mm, h_mm, forms, content, label);
+        i
+    }
+
+    /// A page slot to fill later with [`Doc::fill_page`], so front matter
+    /// can come before the pages it describes. Returns its index.
+    pub fn reserve_page(&mut self) -> usize {
         let page = self.alloc();
+        self.pages.push(Page {
+            id: page,
+            label: String::new(),
+            dict: String::new(),
+        });
+        self.pages.len() - 1
+    }
+
+    /// Fill the reserved page `i`, as [`Doc::add_page`] would.
+    pub fn fill_page(
+        &mut self,
+        i: usize,
+        w_mm: f64,
+        h_mm: f64,
+        forms: &[&str],
+        content: Content,
+        label: &str,
+    ) {
         let stream = self.alloc();
         let mut body = String::new();
         for f in forms {
@@ -180,20 +218,20 @@ impl Doc {
         body.push_str(content.as_str());
         body.push_str("Q\n");
         self.stream(stream, "", body.into_bytes(), false);
-        self.set(
-            page,
-            format!(
-                "<< /Type /Page /Parent {} 0 R /MediaBox [0 0 {} {}] /Resources {} 0 R /Contents {stream} 0 R >>",
-                self.pages_id,
-                pt(w_mm),
-                pt(h_mm),
-                self.resources_id
-            ),
+        self.pages[i].dict = format!(
+            "<< /Type /Page /Parent {} 0 R /MediaBox [0 0 {} {}] /Resources {} 0 R /Contents {stream} 0 R",
+            self.pages_id,
+            pt(w_mm),
+            pt(h_mm),
+            self.resources_id
         );
-        self.pages.push(Page {
-            id: page,
-            label: label.to_string(),
-        });
+        self.pages[i].label = label.to_string();
+    }
+
+    /// A link on page `from` (0-based) over `rect` (mm, `[x0, y0, x1, y1]`)
+    /// that jumps to page `to`. Either page may still be reserved.
+    pub fn add_link(&mut self, from: usize, rect: [f64; 4], to: usize) {
+        self.links.push(Link { from, rect, to });
     }
 
     /// The number of pages so far; the next page's index.
@@ -269,6 +307,44 @@ impl Doc {
                 self.font_id
             ),
         );
+        // Link annotations (PDF/A: printable, no appearance of their own,
+        // no border), then the page objects.
+        let mut annots: Vec<Vec<u32>> = vec![Vec::new(); self.pages.len()];
+        let links = std::mem::take(&mut self.links);
+        for l in links {
+            let id = self.alloc();
+            let to = self.pages[l.to].id;
+            let [x0, y0, x1, y1] = l.rect;
+            self.set(
+                id,
+                format!(
+                    "<< /Type /Annot /Subtype /Link /Rect [{} {} {} {}] /Border [0 0 0] /F 4 \
+                     /Dest [{to} 0 R /Fit] >>",
+                    pt(x0),
+                    pt(y0),
+                    pt(x1),
+                    pt(y1)
+                ),
+            );
+            annots[l.from].push(id);
+        }
+        for (i, page) in self.pages.iter().enumerate() {
+            assert!(
+                !page.dict.is_empty(),
+                "page {i} was reserved but never filled"
+            );
+            let mut d = page.dict.clone();
+            if !annots[i].is_empty() {
+                d.push_str(" /Annots [");
+                for a in &annots[i] {
+                    d.push_str(&format!("{a} 0 R "));
+                }
+                d.push(']');
+            }
+            d.push_str(" >>");
+            let id = page.id;
+            self.objects[id as usize - 1] = Object::Plain(d);
+        }
         // Pages tree.
         let kids: Vec<String> = self.pages.iter().map(|p| format!("{} 0 R", p.id)).collect();
         self.set(

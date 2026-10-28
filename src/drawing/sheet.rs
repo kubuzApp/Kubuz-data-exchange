@@ -281,15 +281,27 @@ pub fn title_values(c: &mut Content, paper: Paper, lang: Lang, v: &TitleValues) 
     c.text_centred(bx + id.x + id.w / 2.0, by + id.y + id.vy - 5.5, h, &t);
     let (t, h) = shrink_to(&v.customer, 3.0, id.w * 0.6);
     c.text([bx + id.x + 1.5, by + id.y + 1.6], h, 0.0, &t);
-    let count = format!(
-        "{} {} · {} {}/{}",
-        lang.t("quantity"),
-        v.quantity,
-        lang.t("sheet"),
-        v.sheet,
-        v.sheets
-    );
+    let count = if v.quantity > 0 {
+        format!(
+            "{} {} · {} {}/{}",
+            lang.t("quantity"),
+            v.quantity,
+            lang.t("sheet"),
+            v.sheet,
+            v.sheets
+        )
+    } else {
+        format!("{} {}/{}", lang.t("sheet"), v.sheet, v.sheets)
+    };
     c.text_right(bx + id.x + id.w - 1.5, by + id.y + 1.6, 2.2, &count);
+}
+
+/// The id cell of the title block on the page, `[x0, y0, x1, y1]`: where
+/// a part sheet links back to the parts list.
+pub fn id_rect(paper: Paper) -> [f64; 4] {
+    let (bx, by) = paper.title_block();
+    let id = cell("id");
+    [bx + id.x, by + id.y, bx + id.x + id.w, by + id.y + id.h]
 }
 
 /// The Form XObject of one format: frame, marks, grid reference, title
