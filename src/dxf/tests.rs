@@ -39,14 +39,6 @@ fn entities(dxf: &str) -> Vec<(String, String)> {
     out
 }
 
-fn texts(dxf: &str) -> Vec<String> {
-    let lines: Vec<&str> = dxf.lines().collect();
-    (0..lines.len() - 1)
-        .filter(|&i| i % 2 == 0 && lines[i] == "1" && lines[i + 1] != "AC1009")
-        .map(|i| lines[i + 1].to_string())
-        .collect()
-}
-
 fn close(a: P2, b: P2) -> bool {
     (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6
 }
@@ -132,8 +124,8 @@ fn four_down_is_one_outline_with_holes_and_eight_bends() {
     let es = entities(&f.dxf);
     let on = |layer: &str, kind: &str| es.iter().filter(|(k, l)| k == kind && l == layer).count();
     assert_eq!(on("BEND", "LINE"), 8);
-    assert_eq!(on("BEND", "TEXT"), 8);
-    assert_eq!(on("ENGRAVE", "TEXT"), 1);
+    // No text anywhere: nothing a CAM could take for a cut.
+    assert!(es.iter().all(|(k, _)| k != "TEXT"), "{es:?}");
     assert!(on("CUT", "LINE") > 8);
     assert_eq!(on("CUT", "ARC"), 4);
     let odd: Vec<_> = es
@@ -141,13 +133,10 @@ fn four_down_is_one_outline_with_holes_and_eight_bends() {
         .filter(|(_, l)| !["CUT", "BEND", "ENGRAVE"].contains(&l.as_str()))
         .collect();
     assert!(odd.is_empty(), "{odd:?}");
-    let ts = texts(&f.dxf);
-    assert!(ts.contains(&"Top".to_string()), "{ts:?}");
-    assert_eq!(
-        ts.iter().filter(|t| *t == "DOWN 90%%d R1.5").count(),
-        8,
-        "{ts:?}"
-    );
+    assert_eq!(f.bends.len(), 8);
+    assert!(f.bends.iter().all(|b| b.direction.label() == "DOWN"
+        && (b.angle_deg - 90.0).abs() < 1e-9
+        && (b.inside_radius - 1.5).abs() < 1e-9));
     assert!(f.dxf.starts_with("0\nSECTION\n2\nHEADER\n"));
     assert!(f.dxf.ends_with("0\nEOF\n"));
     for layer in ["CUT", "BEND", "ENGRAVE"] {
@@ -156,11 +145,15 @@ fn four_down_is_one_outline_with_holes_and_eight_bends() {
 }
 
 #[test]
-fn a_channel_notes_up_and_down_with_their_angles() {
+fn a_channel_reports_up_and_down_with_their_angles() {
     let out = export("mixed_channel_flat");
-    let ts = texts(&out.files[0].dxf);
-    assert!(ts.iter().any(|t| t.starts_with("DOWN 45%%d")), "{ts:?}");
-    assert!(ts.iter().any(|t| t.starts_with("UP 60%%d")), "{ts:?}");
+    let bends: Vec<(&str, i64)> = out.files[0]
+        .bends
+        .iter()
+        .map(|b| (b.direction.label(), b.angle_deg.round() as i64))
+        .collect();
+    assert!(bends.contains(&("DOWN", 45)), "{bends:?}");
+    assert!(bends.contains(&("UP", 60)), "{bends:?}");
     // Its apron is cut round: arcs on the outline.
     let es = entities(&out.files[0].dxf);
     assert!(es.iter().any(|(k, l)| k == "ARC" && l == "CUT"));
@@ -242,6 +235,8 @@ fn json_in_and_out() {
     assert_eq!(out["ok"], true);
     assert_eq!(out["files"][0]["quantity"], 1);
     assert_eq!(out["files"][0]["partIds"][0], "Top");
+    assert_eq!(out["files"][0]["bends"][0]["direction"], "down");
+    assert_eq!(out["files"][0]["bends"][0]["angleDeg"], 90.0);
     assert!(out["files"][0]["dxf"]
         .as_str()
         .unwrap()

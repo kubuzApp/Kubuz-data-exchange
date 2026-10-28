@@ -21,8 +21,11 @@
 
 export type StepResult = { ok: true; step: string } | { ok: false; error: string };
 
+/** What the drawing does not say about a bend line, in the order of the lines. */
+export type DxfBend = { id: string; angleDeg: number; direction: "up" | "down"; insideRadius: number };
+
 /** One DXF flat pattern: the blank that `partIds` share, `quantity` times. */
-export type DxfFile = { name: string; partIds: string[]; quantity: number; dxf: string };
+export type DxfFile = { name: string; partIds: string[]; quantity: number; bends: DxfBend[]; dxf: string };
 
 export type DxfResult =
   | { ok: true; files: DxfFile[]; skipped: { id: string; message: string }[] }
@@ -84,11 +87,11 @@ export async function exportStep(
 /**
  * Write DXF flat patterns from a flat exact-geometry view (`exactGeometry`
  * with `folded` false): one file per distinct sheet blank, with the outline
- * and holes on the CUT layer, the bend lines and their notes (direction,
- * angle, inside radius) on the BEND layer and the part's id on the ENGRAVE
- * layer. Parts that share a blank share a file; `partIds` lists them. A
- * part with no flat pattern (a folded solid, a bar, a mesh) is listed under
- * `skipped` with the reason.
+ * and holes on the CUT layer and the bend lines on the BEND layer; the
+ * ENGRAVE layer is declared and empty, and no text is written. Each bend's
+ * direction, angle and inside radius come back in `bends`. Parts that share
+ * a blank share a file; `partIds` lists them. A part with no flat pattern
+ * (a folded solid, a bar, a mesh) is listed under `skipped` with the reason.
  */
 export async function exportDxf(view: object | string, options?: InitOptions): Promise<DxfResult> {
   const text = typeof view === "string" ? view : JSON.stringify(view);

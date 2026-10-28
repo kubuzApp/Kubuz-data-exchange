@@ -1,7 +1,9 @@
 //! DXF flat patterns from the exact-geometry view: one file per distinct
-//! sheet blank, with the outline and holes on the CUT layer, the kernel's
-//! bend lines (and a note with angle, direction and inside radius) on the
-//! BEND layer, and the part's id on the ENGRAVE layer.
+//! sheet blank, with the outline and holes on the CUT layer and the
+//! kernel's bend lines on the BEND layer. The ENGRAVE layer is declared
+//! for markings and empty for now; no text is written, so nothing in the
+//! file can be mistaken for a cut. Each bend's angle, direction and inside
+//! radius come back in the result's `bends`, for a job sheet.
 //!
 //! The view must be flat (`exactGeometry(json, false)`): every zone a
 //! plane on the blank, and each solid listing its `bends`. A folded solid,
@@ -10,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::view::{Pose, View};
+use crate::view::{BendDirection, Pose, View};
 
 pub mod blank;
 pub mod writer;
@@ -21,7 +23,18 @@ pub struct DxfFile {
     /// The first part's id, for the file name.
     pub name: String,
     pub part_ids: Vec<String>,
+    /// The blank's bends, in the order of their lines in the file.
+    pub bends: Vec<BendInfo>,
     pub dxf: String,
+}
+
+/// What the drawing does not say about a bend line.
+#[derive(Clone, Debug)]
+pub struct BendInfo {
+    pub id: String,
+    pub angle_deg: f64,
+    pub direction: BendDirection,
+    pub inside_radius: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -37,8 +50,9 @@ pub struct DxfExport {
 }
 
 impl DxfExport {
-    /// `{ "ok": true, "files": [{ name, partIds, quantity, dxf }],
-    /// "skipped": [{ id, message }] }`.
+    /// `{ "ok": true, "files": [{ name, partIds, quantity, bends: [{ id,
+    /// angleDeg, direction, insideRadius }], dxf }], "skipped": [{ id,
+    /// message }] }`.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "ok": true,
@@ -46,6 +60,12 @@ impl DxfExport {
                 "name": f.name,
                 "partIds": f.part_ids,
                 "quantity": f.part_ids.len(),
+                "bends": f.bends.iter().map(|b| serde_json::json!({
+                    "id": b.id,
+                    "angleDeg": b.angle_deg,
+                    "direction": b.direction.label().to_lowercase(),
+                    "insideRadius": b.inside_radius,
+                })).collect::<Vec<_>>(),
                 "dxf": f.dxf,
             })).collect::<Vec<_>>(),
             "skipped": self.skipped.iter().map(|s| serde_json::json!({
@@ -101,11 +121,21 @@ pub fn write_dxf(view: &View) -> Result<DxfExport, String> {
         };
         match blank::flat_blank(solid, mirror, scale) {
             Ok(blank) => {
-                let dxf = writer::write(&blank, &id);
+                let dxf = writer::write(&blank);
                 by_blank.insert(key, out.files.len());
                 out.files.push(DxfFile {
                     name: id.clone(),
                     part_ids: vec![id],
+                    bends: blank
+                        .bends
+                        .iter()
+                        .map(|b| BendInfo {
+                            id: b.id.clone(),
+                            angle_deg: b.angle_deg,
+                            direction: b.direction,
+                            inside_radius: b.inside_radius,
+                        })
+                        .collect(),
                     dxf,
                 });
             }

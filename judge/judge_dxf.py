@@ -3,10 +3,9 @@
     python judge_dxf.py out/Top.dxf [more.dxf ...]     one line of JSON per file
 
 Each file must read as DXF R12, pass ezdxf's audit with no error, keep every
-entity on CUT, BEND or ENGRAVE, and have its CUT entities chain into closed
-loops (every end point shared by exactly two segments, or a whole circle).
-A file with bend lines must note each one on the BEND layer. The exit code
-is the number of files that failed.
+entity on CUT, BEND or ENGRAVE, carry no text, and have its CUT entities
+chain into closed loops (every end point shared by exactly two segments, or
+a whole circle). The exit code is the number of files that failed.
 """
 
 import json
@@ -67,15 +66,9 @@ def judge(path):
     loose = cut_loops_close(msp)
     if loose:
         out["problems"].append(f"{len(loose)} open end(s) on CUT")
-    bends = kinds.get(("LINE", "BEND"), 0)
-    notes = kinds.get(("TEXT", "BEND"), 0)
-    if bends != notes:
-        out["problems"].append(f"{bends} bend line(s) but {notes} note(s)")
-    for t in msp.query('TEXT[layer=="BEND"]'):
-        if not (t.dxf.text.startswith("UP ") or t.dxf.text.startswith("DOWN ")):
-            out["problems"].append(f"bend note {t.dxf.text!r}")
-    if kinds.get(("TEXT", "ENGRAVE"), 0) != 1:
-        out["problems"].append("no part mark on ENGRAVE")
+    texts = sum(n for (k, _), n in kinds.items() if k in ("TEXT", "MTEXT"))
+    if texts:
+        out["problems"].append(f"{texts} text entit(ies)")
     out["ok"] = not out["problems"]
     return out
 

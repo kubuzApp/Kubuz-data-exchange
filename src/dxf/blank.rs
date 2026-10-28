@@ -46,12 +46,11 @@ pub struct BendLine {
 }
 
 /// A flat pattern: closed loops of segments (the outline and the holes,
-/// all cut), the bend lines, and a point inside the root zone for a mark.
+/// all cut) and the bend lines.
 #[derive(Clone, Debug, Default)]
 pub struct Blank {
     pub loops: Vec<Vec<Seg>>,
     pub bends: Vec<BendLine>,
-    pub mark: P2,
     pub min: P2,
     pub max: P2,
 }
@@ -176,21 +175,6 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
             b: to2(b.line[1]),
         });
     }
-    // A mark goes in the first outer-skin face, which the kernel writes
-    // for the root zone: the middle of that face's bounds.
-    let root = &solid.faces[outer[0]];
-    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for le in root.loops.iter().flatten() {
-        let e = solid.edges[le.edge];
-        for vi in [e.start, e.end] {
-            let p = to2(solid.vertices[vi]);
-            for i in 0..2 {
-                lo[i] = lo[i].min(p[i]);
-                hi[i] = hi[i].max(p[i]);
-            }
-        }
-    }
-    blank.mark = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
     blank.normalise();
     Ok(blank)
 }
@@ -315,7 +299,6 @@ impl Blank {
             mv(&mut b.a);
             mv(&mut b.b);
         }
-        mv(&mut self.mark);
         self.min = [0.0, 0.0];
         self.max = [hi[0] - lo[0], hi[1] - lo[1]];
     }

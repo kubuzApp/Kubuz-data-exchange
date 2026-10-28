@@ -54,16 +54,20 @@ cargo run --release --example view2dxf -- flat.view.json out_dir
 ```
 
 Each file is DXF R12 (`AC1009`), in millimetres, the blank seen from its
-outer skin with its lower-left corner at the origin, on three layers:
+outer skin with its lower-left corner at the origin, on three layers and
+with no text, so nothing in the file can be taken for a cut:
 
 | Layer | Holds |
 |---|---|
 | `CUT` | The outline and every hole, as `LINE`, `ARC` and `CIRCLE` entities. |
-| `BEND` | One dashed `LINE` down the middle of each bend zone, and a `TEXT` beside it: `DOWN 90%%d R1.5` (direction seen from the outer skin, angle, inside radius). |
-| `ENGRAVE` | A `TEXT` with the part's id, in the root zone. |
+| `BEND` | One dashed `LINE` down the middle of each bend zone. |
+| `ENGRAVE` | Declared for markings; empty until the kernel has some. |
 
-Parts that share a solid share one file; `partIds` lists them and
-`quantity` counts them. A part placed by a mirror image gets a mirrored
+What the drawing does not say about a bend comes back beside it: each file's
+`bends` lists, in the order of the lines, the bend's `id`, `angleDeg`,
+`direction` (`up` or `down`, seen from the outer skin) and `insideRadius`,
+for a job sheet. Parts that share a solid share one file; `partIds` lists
+them and `quantity` counts them. A part placed by a mirror image gets a mirrored
 blank of its own (the bend directions stay: the outer skin is the same
 skin), a uniform scale a scaled one. A part with no flat pattern (a
 folded solid, a bar, a mesh, a rolled shell) is listed under `skipped`
@@ -181,8 +185,8 @@ blank back.
 
 DXF files have a judge too: [`judge/judge_dxf.py`](judge/judge_dxf.py)
 reads each one back with [ezdxf](https://ezdxf.mozman.at/), audits it,
-checks that every entity sits on `CUT`, `BEND` or `ENGRAVE`, that the `CUT`
-entities close into loops, and that every bend line has its note.
+checks that every entity sits on `CUT`, `BEND` or `ENGRAVE`, that there is
+no text, and that the `CUT` entities close into loops.
 
 ```
 pip install ezdxf==1.4.5

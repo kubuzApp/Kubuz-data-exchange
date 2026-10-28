@@ -1,16 +1,13 @@
 //! DXF R12 (AC1009) text, the dialect every laser shop's CAM reads: lines,
-//! arcs, circles and text on named layers. Nothing newer is needed for a
-//! flat pattern, and nothing newer is read as widely.
+//! arcs and circles on named layers, and no text at all, so nothing in the
+//! file can be mistaken for a cut. Nothing newer is needed for a flat
+//! pattern, and nothing newer is read as widely.
 
 use super::blank::{Blank, Seg, P2};
 
 pub const LAYER_CUT: &str = "CUT";
 pub const LAYER_BEND: &str = "BEND";
 pub const LAYER_ENGRAVE: &str = "ENGRAVE";
-
-/// Height of the text next to a bend line and of the part mark, in mm.
-const BEND_TEXT: f64 = 2.5;
-const MARK_TEXT: f64 = 5.0;
 
 /// A number as DXF writes it: nine decimals (an arc of a few metres'
 /// radius still meets its neighbour within a micron), trailing zeros
@@ -61,25 +58,12 @@ impl Dxf {
         self.point(10, c);
         self.pair(40, &num(r));
     }
-
-    /// Text centred on `at`, turned by `rotation` degrees.
-    fn text(&mut self, layer: &str, at: P2, height: f64, rotation: f64, text: &str) {
-        self.pair(0, "TEXT");
-        self.pair(8, layer);
-        self.point(10, at);
-        self.pair(40, &num(height));
-        self.pair(1, text);
-        if rotation.abs() > 1e-9 {
-            self.pair(50, &num(rotation));
-        }
-        self.pair(72, "1");
-        self.point(11, at);
-    }
 }
 
-/// The whole file for one blank, marked `mark` (the part's id) on the
-/// ENGRAVE layer.
-pub fn write(blank: &Blank, mark: &str) -> String {
+/// The whole file for one blank. The ENGRAVE layer is declared but empty:
+/// the kernel has no markings yet, and the part's id travels in the file
+/// name, not as text in the drawing.
+pub fn write(blank: &Blank) -> String {
     let mut d = Dxf { out: String::new() };
     d.pair(0, "SECTION");
     d.pair(2, "HEADER");
@@ -144,39 +128,8 @@ pub fn write(blank: &Blank, mark: &str) -> String {
     }
     for b in &blank.bends {
         d.line(LAYER_BEND, b.a, b.b);
-        // The note reads along the line, upright, just beside it.
-        let (dx, dy) = (b.b[0] - b.a[0], b.b[1] - b.a[1]);
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-9 {
-            continue;
-        }
-        let mut rot = dy.atan2(dx).to_degrees();
-        let mut side = [-dy / len, dx / len];
-        if rot > 90.0 + 1e-9 || rot <= -90.0 + 1e-9 {
-            rot += 180.0;
-            side = [-side[0], -side[1]];
-        }
-        let rot = rot.rem_euclid(360.0);
-        let mid = [(b.a[0] + b.b[0]) / 2.0, (b.a[1] + b.b[1]) / 2.0];
-        let off = BEND_TEXT * 0.8;
-        let at = [mid[0] + side[0] * off, mid[1] + side[1] * off];
-        d.text(LAYER_BEND, at, BEND_TEXT, rot, &bend_note(b));
-    }
-    if !mark.is_empty() {
-        d.text(LAYER_ENGRAVE, blank.mark, MARK_TEXT, 0.0, mark);
     }
     d.pair(0, "ENDSEC");
     d.pair(0, "EOF");
     d.out
-}
-
-/// `DOWN 90%%d R1.5`: direction, angle (`%%d` is DXF's degree sign) and
-/// inside radius.
-pub fn bend_note(b: &super::blank::BendLine) -> String {
-    format!(
-        "{} {}%%d R{}",
-        b.direction.label(),
-        num((b.angle_deg * 100.0).round() / 100.0),
-        num((b.inside_radius * 100.0).round() / 100.0)
-    )
 }
