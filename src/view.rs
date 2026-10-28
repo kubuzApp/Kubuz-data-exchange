@@ -49,6 +49,47 @@ pub struct Solid {
     pub faces: Vec<Face>,
     #[serde(default)]
     pub mesh: Option<Mesh>,
+    /// The brake bends of a flat blank (the kernel writes them only when
+    /// the view is flat). The DXF writer draws them on the BEND layer.
+    #[serde(default)]
+    pub bends: Vec<Bend>,
+}
+
+/// One brake bend on a flat blank: the centre line of its bend zone on the
+/// sheet's zero (w = 0), the unsigned fold angle, which way the flange
+/// folds seen from the outer skin, the inside radius and the allowance.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bend {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub zone_id: String,
+    pub angle_deg: f64,
+    pub direction: BendDirection,
+    #[serde(default)]
+    pub inside_radius: f64,
+    #[serde(default)]
+    pub allowance: f64,
+    pub line: [P3; 2],
+}
+
+/// `down` folds the flange away from the outer skin's normal; `up` folds
+/// it toward whoever looks at the outer skin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BendDirection {
+    Up,
+    Down,
+}
+
+impl BendDirection {
+    pub fn label(self) -> &'static str {
+        match self {
+            BendDirection::Up => "UP",
+            BendDirection::Down => "DOWN",
+        }
+    }
 }
 
 /// A closed triangle mesh in millimetres: `triangles` index `vertices`,

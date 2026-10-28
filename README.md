@@ -1,7 +1,8 @@
 # Kubuz data exchange
 
 File formats written from the Kubuz kernel's **exact-geometry view**. Today
-that is STEP (ISO 10303-21, AP214). More formats come as the CPQ needs them.
+that is STEP (ISO 10303-21, AP214) of the folded parts and DXF (R12) flat
+patterns of the sheet blanks. More formats come as the CPQ needs them.
 
 The kernel knows sheet metal: it turns a programme into exact faces (planes,
 cylinders, ruled spline strips) and edges (lines, circles, cubic splines),
@@ -31,6 +32,47 @@ In Rust:
 ```rust
 let file = kubuz_data_exchange::write_step_json(&view_json, "worktable")?;
 ```
+
+### DXF flat patterns
+
+The flat view (`exactGeometry(json, false)`) gives each sheet as its blank,
+with the kernel's bend lines. `exportDxf` writes one DXF per distinct blank:
+
+```ts
+const flat = await exactGeometry(programJson, undefined, false);
+if (flat.ok) {
+  const out = await exportDxf(flat.view);
+  if (out.ok) {
+    for (const file of out.files) saveAs(`${file.name}.dxf`, file.dxf);
+    for (const part of out.skipped) console.warn(part.id, part.message);
+  }
+}
+```
+
+```
+cargo run --release --example view2dxf -- flat.view.json out_dir
+```
+
+Each file is DXF R12 (`AC1009`), in millimetres, the blank seen from its
+outer skin with its lower-left corner at the origin, on three layers and
+with no text, so nothing in the file can be taken for a cut:
+
+| Layer | Holds |
+|---|---|
+| `CUT` | The outline and every hole, as `LINE`, `ARC` and `CIRCLE` entities. |
+| `BEND` | One dashed `LINE` down the middle of each bend zone. |
+| `ENGRAVE` | Declared for markings; empty until the kernel has some. |
+
+What the drawing does not say about a bend comes back beside it: each file's
+`bends` lists, in the order of the lines, the bend's `id`, `angleDeg`,
+`direction` (`up` or `down`, seen from the outer skin) and `insideRadius`,
+for a job sheet. Parts that share a solid share one file; `partIds` lists
+them and `quantity` counts them. A part placed by a mirror image gets a mirrored
+blank of its own (the bend directions stay: the outer skin is the same
+skin), a uniform scale a scaled one. A part with no flat pattern (a
+folded solid, a bar, a mesh, a rolled shell) is listed under `skipped`
+with the reason, never written wrong. Splines on an outline are refused;
+the kernel fits every curve with arcs before it reaches the view.
 
 From the command line, with a view the kernel wrote (`exact_view` example in
 the kernel repo, or any `{ ok, view }` result):
@@ -83,6 +125,9 @@ One JSON document. Units are millimetres.
       "featureId": "Apron", "zoneId": "Apron", "role": "outerSkin"
     }]
   }],
+  "bends": [{"id": "BendApron", "zoneId": "BendApron", "angleDeg": 90,
+             "direction": "down", "insideRadius": 1.5, "allowance": 3.3,
+             "line": [[x, y, 0], [x, y, 0]]}],
   "parts": [{"id": "Apron", "solid": "solid-0", "material": "304", "thickness": 1.5,
              "color": "#b0b0b8",
              "position": [x, y, z], "rotation": [rx, ry, rz],
@@ -101,6 +146,9 @@ Rules the kernel keeps and the writer relies on:
 - a `ruledBspline` is degree 1 between two `bspline` curves with the same
   degree and knots, u along them and v from `top` to `bottom`, normal du × dv;
 - identical parts share one solid;
+- a flat view's solid lists its `bends`: the centre line of each bend zone
+  on the sheet's zero, the unsigned angle, `up` or `down` seen from the
+  outer skin, the inside radius and the allowance. A folded solid has none;
 - world point = `matrix` · local point + `position`. `rotation` is the same
   pose in degrees, R = Rx · Ry · Rz, and is used only when `matrix` is absent.
 
@@ -113,7 +161,8 @@ so a cabinet of twelve equal plates is one model with twelve occurrences.
 
 The Rust types are in [`src/view.rs`](src/view.rs). A field is renamed only
 with a matching change in the kernel. The fixtures `mesh_*.view.json` and
-`four_down_mirrored.view.json` cover the two additions above.
+`four_down_mirrored.view.json` cover the two additions above; the
+`*_flat.view.json` fixtures are flat views with bends.
 
 ## The judge
 
@@ -133,6 +182,16 @@ python -I judge/judge.py out/*.step
 Readers that have opened these files: OpenCascade (FreeCAD's engine) and
 Autodesk Inventor, where Convert to Sheet Metal and Unfold give the kernel's
 blank back.
+
+DXF files have a judge too: [`judge/judge_dxf.py`](judge/judge_dxf.py)
+reads each one back with [ezdxf](https://ezdxf.mozman.at/), audits it,
+checks that every entity sits on `CUT`, `BEND` or `ENGRAVE`, that there is
+no text, and that the `CUT` entities close into loops.
+
+```
+pip install ezdxf==1.4.5
+python -I judge/judge_dxf.py out/*.dxf
+```
 
 ## Build
 

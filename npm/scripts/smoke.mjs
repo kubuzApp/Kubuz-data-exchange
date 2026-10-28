@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const wasmDir = join(root, "wasm");
-const { default: init, exportStep } = await import(
+const { default: init, exportDxf, exportStep } = await import(
   pathToFileURL(join(wasmDir, "kubuz_data_exchange.js")).href
 );
 await init({ module_or_path: await readFile(join(wasmDir, "kubuz_data_exchange_bg.wasm")) });
@@ -27,4 +27,15 @@ if (bad.ok) {
   console.error("an empty view must be refused");
   process.exit(1);
 }
-console.log(`ok: deck_splash, ${result.step.length} bytes, ${parts} parts`);
+const flat = await readFile(join(root, "..", "fixtures", "four_down_flat.view.json"), "utf8");
+const dxf = JSON.parse(exportDxf(flat));
+if (!dxf.ok || dxf.files.length !== 1 || dxf.skipped.length !== 0) {
+  console.error(`unexpected dxf result: ${JSON.stringify(dxf).slice(0, 200)}`);
+  process.exit(1);
+}
+const bends = (dxf.files[0].dxf.match(/\nBEND\n/g) ?? []).length;
+if (!dxf.files[0].dxf.startsWith("0\nSECTION\n") || bends < 8 || dxf.files[0].quantity !== 1) {
+  console.error(`unexpected dxf: ${bends} bend entities`);
+  process.exit(1);
+}
+console.log(`ok: deck_splash, ${result.step.length} bytes, ${parts} parts; four_down_flat, ${dxf.files[0].dxf.length} bytes of DXF`);

@@ -35,8 +35,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install cadquery-ocp==8.0.1
-      - run: cargo build --release --example view2step
+      - run: pip install cadquery-ocp==8.0.1 ezdxf==1.4.5
+      - run: cargo build --release --example view2step --example view2dxf
       - name: Write and judge every fixture
         run: |
           mkdir -p out
@@ -45,6 +45,14 @@ jobs:
             target/release/examples/view2step "$v" "out/$n.step" "$n"
           done
           python -I judge/judge.py out/*.step
+      # The flat fixtures are also written as DXF and read back by ezdxf.
+      - name: Write and judge every flat pattern
+        run: |
+          for v in fixtures/*_flat*.view.json; do
+            n=$(basename "$v" .view.json)
+            target/release/examples/view2dxf "$v" "out/dxf/$n"
+          done
+          python -I judge/judge_dxf.py out/dxf/*/*.dxf
 
   package:
     name: Package
