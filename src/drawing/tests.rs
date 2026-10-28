@@ -40,7 +40,7 @@ fn every_folded_fixture_becomes_a_sheet_with_views_and_bends() {
     for (name, bends, views) in [
         ("four_down", 8, 3),
         ("hex_pan", 6, 2),
-        ("mixed_channel", 2, 3),
+        ("mixed_channel", 2, 4),
         ("deck_splash", 3, 3),
         ("short_flange", 1, 3),
         ("roll_tube", 0, 3),
@@ -74,6 +74,25 @@ fn every_folded_fixture_becomes_a_sheet_with_views_and_bends() {
         let ords = s.dimensions.iter().filter(|d| d.kind == "ordinate").count();
         assert!(ords >= 6, "{name}: {ords} ordinates");
     }
+    // The channel's 45° apron, with its hole, gets an auxiliary view of
+    // its own zone and a diameter callout there.
+    let out = write_drawings(&view("mixed_channel"), &Meta::default()).unwrap();
+    let s = &out.sheets[0];
+    let aux = s
+        .views
+        .iter()
+        .find(|v| v.name == "aux A")
+        .expect("aux view");
+    assert_eq!(aux.partial.as_deref(), Some("Apron"));
+    assert!(
+        (aux.d[1] + aux.d[2]).abs() < 1e-6 && aux.d[1] < 0.0,
+        "{:?}",
+        aux.d
+    );
+    assert!(s
+        .dimensions
+        .iter()
+        .any(|d| d.kind == "diameter" && d.text == "⌀12" && d.axis.as_deref() == Some("aux A")));
 }
 
 #[test]

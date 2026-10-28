@@ -680,16 +680,23 @@ fn slope(solid: &Solid, fi: usize, p: P3, basis: &Basis) -> f64 {
     }
 }
 
-/// Project `solid` along `basis`.
 /// Project `solid` along `basis`. Hidden edges less than `thickness`
 /// behind the surface in front of them (the inner skin behind the outer)
-/// are left out.
+/// are left out. Edges of no face (a partial solid's) are not drawn.
 pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> Projection {
+    let used = |ei: usize| !topo.faces_of_edge[ei].is_empty();
+    let sample_used = |ei: usize, step: f64| {
+        let mut s = sample_edge(solid, ei, step);
+        if !used(ei) {
+            s.pts.clear();
+        }
+        s
+    };
     // Coarse samples for the bounding box.
     let mut min = [f64::INFINITY; 2];
     let mut max = [f64::NEG_INFINITY; 2];
     let coarse: Vec<Sampled> = (0..solid.edges.len())
-        .map(|ei| sample_edge(solid, ei, 2.0))
+        .map(|ei| sample_used(ei, 2.0))
         .collect();
     for s in &coarse {
         for p in &s.pts {
@@ -719,7 +726,7 @@ pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> 
 
     // Fine samples of every edge, in 3D and in the view.
     let fine: Vec<Sampled> = (0..solid.edges.len())
-        .map(|ei| sample_edge(solid, ei, step))
+        .map(|ei| sample_used(ei, step))
         .collect();
     let fine2: Vec<Vec<P2>> = fine
         .iter()

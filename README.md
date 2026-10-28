@@ -165,9 +165,12 @@ holes get `⌀` callouts in the view that looks at them, a bend angle other
 than 90° is drawn between the flanges, every bend carries its number in a
 circle on a view where it is seen (the tags chain when several sit on one
 line), and the same bend table lists angle, direction and inside radius.
-A rolled tube shows both diameters. Slits between flanges and the relief
-corners of a bend are "small" like reliefs in the flat pattern and are
-left to the flat pattern.
+A rolled tube shows both diameters. A flange with a hole that no principal
+view looks straight at gets an **auxiliary view** (ISO 128-30) of its own:
+the flange true to shape, titled `AANZICHT A` (with its scale when it is
+smaller), and an arrow with the letter on the front view saying where it
+looks from. Slits between flanges and the relief corners of a bend are
+"small" like reliefs in the flat pattern and are left to the flat pattern.
 
 Numbers are written to a tenth with a decimal comma and no trailing zero
 (`45,5`, `36`). The notes are in Dutch, English or French (`language`).

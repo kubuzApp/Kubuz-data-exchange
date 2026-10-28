@@ -76,7 +76,8 @@ export type DrawingBend = {
 
 /** One view of a folded part on its sheet. */
 export type DrawingView = {
-  name: "front" | "left" | "right" | "top" | "bottom" | "isometric";
+  /** A principal view, the isometric, or an auxiliary view `aux A`, `aux B`, … */
+  name: string;
   /** The view's frame in part coordinates: right, up and towards the viewer. */
   r: [number, number, number];
   u: [number, number, number];
@@ -92,6 +93,8 @@ export type DrawingView = {
   angles: { bend: number; value: number; text: string }[];
   /** Bend numbers tagged on this view. */
   tags: number[];
+  /** Auxiliary views: the zone (flange) shown on its own. */
+  partial?: string;
 };
 
 /** One sheet of the dossier: the blank that `partIds` share, `quantity` times. */

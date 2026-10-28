@@ -116,6 +116,7 @@ const LABELS: &[(&str, [&str; 3])] = &[
     ),
     ("size", ["Afmeting", "Size", "Encombrement"]),
     ("isometric", ["ISOMETRIE", "ISOMETRIC", "ISOMÉTRIE"]),
+    ("view", ["AANZICHT", "VIEW", "VUE"]),
     (
         "outside_note",
         [

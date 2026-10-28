@@ -39,6 +39,9 @@ const GAP: f64 = 8.0;
 /// Radius of an angle dimension's arc on paper.
 const ANGLE_R: f64 = 10.0;
 const TAG_R: f64 = 2.5;
+/// View arrow (ISO 128-30): its length and the letter's height.
+const ARROW_L: f64 = 10.0;
+const ARROW_H: f64 = 5.0;
 const MINOR_MIN: f64 = 6.0;
 const MINOR_MAX: f64 = 25.0;
 const ISO_TITLE_H: f64 = 6.0;
@@ -398,19 +401,42 @@ pub enum Place {
     Below,
     Above,
     Iso,
+    /// An auxiliary view (ISO 128-30) in a free corner, lettered A, B, …
+    Aux(u8),
 }
 
 impl Place {
-    fn name(self) -> &'static str {
+    fn name(self) -> String {
         match self {
-            Place::Centre => "front",
-            Place::Right => "left",
-            Place::Left => "right",
-            Place::Below => "top",
-            Place::Above => "bottom",
-            Place::Iso => "isometric",
+            Place::Centre => "front".into(),
+            Place::Right => "left".into(),
+            Place::Left => "right".into(),
+            Place::Below => "top".into(),
+            Place::Above => "bottom".into(),
+            Place::Iso => "isometric".into(),
+            Place::Aux(k) => format!("aux {}", Place::letter(k)),
         }
     }
+
+    fn letter(k: u8) -> char {
+        (b'A' + k) as char
+    }
+}
+
+/// The arrow on the front view that says where an auxiliary view looks
+/// from (ISO 128-30), in view millimetres until `place_extras` sets the
+/// paper points.
+#[derive(Clone, Debug)]
+pub struct ViewArrow {
+    pub letter: char,
+    /// Where the arrow's line leaves the view's box, and the viewing
+    /// direction, both in view coordinates.
+    pub exit: P2,
+    pub dir: P2,
+    /// Paper tail and tip of the arrow and lower-left of the letter.
+    pub tail: P2,
+    pub tip: P2,
+    pub at: P2,
 }
 
 /// An angle dimension in a view, in view millimetres.
@@ -453,6 +479,9 @@ pub struct ViewPlan {
     pub feat: Features,
     pub angles: Vec<AngleDim>,
     pub tags: Vec<BendTag>,
+    pub arrows: Vec<ViewArrow>,
+    /// The zone an auxiliary view is limited to.
+    pub zone: Option<String>,
     pub layout: Option<Layout>,
     /// Paper margins [left, bottom, right, top] beyond the scaled view.
     pub margin: [f64; 4],
@@ -481,6 +510,9 @@ pub struct ViewReport {
     pub size: [f64; 2],
     pub angles: Vec<AngleReport>,
     pub tags: Vec<usize>,
+    /// The zone an auxiliary view shows on its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -759,6 +791,7 @@ fn plan_views(
                 let dd = unit(add(add(d, r), u));
                 Basis::new(dd, unit(sub(r, mul(dd, dot(r, dd)))))
             }
+            Place::Aux(_) => front,
         }
     };
     let candidates = [
@@ -1036,6 +1069,8 @@ fn plan_views(
             feat,
             angles,
             tags,
+            arrows: vec![],
+            zone: None,
             layout: None,
             margin: [0.0; 4],
         });
@@ -1154,6 +1189,167 @@ fn plan_views(
         });
     }
 
+    // Auxiliary views (ISO 128-30): a flange with a hole or cutout that
+    // no chosen view looks straight at is drawn true to shape on its own,
+    // with an arrow and a letter on the front view saying where from.
+    let mut aux_normals: Vec<P3> = Vec::new();
+    for fl in &a.flanges {
+        if solid.faces[fl.face].loops.len() < 2 {
+            continue;
+        }
+        if views.iter().any(|v| dot(v.proj.basis.d, fl.n) > 0.9999)
+            || aux_normals.iter().any(|n| dot(*n, fl.n) > 0.9999)
+            || aux_normals.len() >= 3
+        {
+            continue;
+        }
+        let k = aux_normals.len() as u8;
+        aux_normals.push(fl.n);
+        let mut r_hint = fl.long_edge.unwrap_or(front.r);
+        if norm(sub(r_hint, mul(fl.n, dot(r_hint, fl.n)))) < 0.1 {
+            r_hint = front.u;
+        }
+        // The flange reads like the front view: its long edge along the
+        // front view's right, not against it.
+        let b = Basis::new(fl.n, r_hint);
+        let b = if dot(b.r, front.r) + dot(b.u, front.u) < 0.0 {
+            Basis::new(fl.n, mul(b.r, -1.0))
+        } else {
+            b
+        };
+        // Only the zone's faces: the flange between its bends.
+        let part = Solid {
+            faces: solid
+                .faces
+                .iter()
+                .filter(|f| f.zone_id == fl.zone)
+                .cloned()
+                .collect(),
+            ..solid.clone()
+        };
+        let part_topo = topology(&part);
+        let proj = project(&part, &part_topo, b, t);
+        let min = proj.min;
+        let max = [proj.max[0] - proj.min[0], proj.max[1] - proj.min[1]];
+        if max[0] < SAME || max[1] < SAME {
+            continue;
+        }
+        let shift = |p: P2| [p[0] - min[0], p[1] - min[1]];
+        let shift_seg = |s: &Seg| match *s {
+            Seg::Line { a, b } => Seg::Line {
+                a: shift(a),
+                b: shift(b),
+            },
+            Seg::Arc { c, r, start, end } => Seg::Arc {
+                c: shift(c),
+                r,
+                start,
+                end,
+            },
+            Seg::Circle { c, r } => Seg::Circle { c: shift(c), r },
+        };
+        let mut loops: Vec<Vec<Seg>> = Vec::new();
+        let outline: Vec<Seg> = proj.outline.iter().map(shift_seg).collect();
+        if outline.len() >= 3 || matches!(outline.as_slice(), [Seg::Circle { .. }]) {
+            loops.push(outline);
+        } else {
+            continue;
+        }
+        for (fi, f) in part.faces.iter().enumerate() {
+            if f.role != "outerSkin" {
+                continue;
+            }
+            let Some(Surface::Plane { normal, .. }) = part.surfaces.get(f.surface) else {
+                continue;
+            };
+            let n = unit(*normal);
+            let n = if f.same_sense { n } else { mul(n, -1.0) };
+            if dot(n, b.d) < 0.9999 || f.loops.len() < 2 {
+                continue;
+            }
+            loops.extend(hole_loops(&part, fi, &proj, &shift));
+        }
+        let blank = crate::dxf::blank::Blank {
+            loops,
+            bends: vec![],
+            min: [0.0, 0.0],
+            max,
+        };
+        let mut feat = super::features::features(&blank);
+        minor += feat.minor;
+        feat.loops = proj
+            .visible
+            .iter()
+            .chain(proj.smooth.iter())
+            .chain(proj.hidden.iter())
+            .map(|s| vec![shift_seg(s)])
+            .collect();
+        feat.max = max;
+        for axis in 0..2 {
+            let axis_w = if axis == 0 { b.r } else { b.u };
+            let ords = if axis == 0 {
+                &mut feat.xs
+            } else {
+                &mut feat.ys
+            };
+            let mid = max[axis] / 2.0;
+            let values: Vec<f64> = ords.iter().map(|o| o.value).collect();
+            ords.retain(|o| {
+                let v = o.value;
+                let extent = o.sources.iter().any(|s| s == "extent");
+                extent
+                    || !values.iter().any(|w| {
+                        let d = (w - v).abs();
+                        d > SAME && d <= t + SAME && (w - mid).abs() > (v - mid).abs()
+                    })
+            });
+            ords.retain(|o| registry.claim(axis_w, o.value + min[axis]));
+        }
+        // The arrow on the front view: from the viewer's side of the
+        // flange's centre, out of the view's box, pointing at it.
+        {
+            let v0 = &mut views[0];
+            let bf = v0.proj.basis;
+            let m0 = v0.proj.min;
+            let c2 = [dot(fl.centre, bf.r) - m0[0], dot(fl.centre, bf.u) - m0[1]];
+            let d2 = bf.xy(mul(fl.n, -1.0));
+            let dir = if (d2[0] * d2[0] + d2[1] * d2[1]).sqrt() > 0.2 {
+                unit2(d2)
+            } else {
+                [0.0, -1.0]
+            };
+            let back = [-dir[0], -dir[1]];
+            let mx = v0.feat.max;
+            let mut t_exit = f64::INFINITY;
+            for k in 0..2 {
+                if back[k].abs() > 1e-9 {
+                    let edge = if back[k] > 0.0 { mx[k] } else { 0.0 };
+                    t_exit = t_exit.min((edge - c2[k]) / back[k]);
+                }
+            }
+            let t_exit = t_exit.max(0.0);
+            v0.arrows.push(ViewArrow {
+                letter: Place::letter(k),
+                exit: [c2[0] + back[0] * t_exit, c2[1] + back[1] * t_exit],
+                dir,
+                tail: [0.0; 2],
+                tip: [0.0; 2],
+                at: [0.0; 2],
+            });
+        }
+        views.push(ViewPlan {
+            place: Place::Aux(k),
+            proj,
+            feat,
+            angles: vec![],
+            tags: vec![],
+            arrows: vec![],
+            zone: Some(fl.zone.clone()),
+            layout: None,
+            margin: [0.0; 4],
+        });
+    }
+
     // The isometric, without dimensions.
     let proj = project(solid, topo, bases(Place::Iso), t);
     let mut feat = Features {
@@ -1185,6 +1381,8 @@ fn plan_views(
         feat,
         angles: vec![],
         tags: vec![],
+        arrows: vec![],
+        zone: None,
         layout: None,
         margin: [2.0; 4],
     });
@@ -1315,6 +1513,57 @@ fn place_extras(v: &mut ViewPlan, s: f64) {
         margin[2] = margin[2].max(at[0] + TAG_R + 1.0 - w);
         margin[3] = margin[3].max(at[1] + TAG_R + 1.0 - h);
     }
+    // View arrows: the tip just outside the box, the letter past the tail,
+    // pushed further out until clear.
+    for ar in &mut v.arrows {
+        let exit = [ar.exit[0] * s, ar.exit[1] * s];
+        let back = [-ar.dir[0], -ar.dir[1]];
+        let tw = font::width(&ar.letter.to_string(), ARROW_H);
+        let mut gap = 3.0;
+        for _ in 0..30 {
+            let tip = [exit[0] + back[0] * gap, exit[1] + back[1] * gap];
+            let tail = [tip[0] + back[0] * ARROW_L, tip[1] + back[1] * ARROW_L];
+            let lc = [
+                tail[0] + back[0] * (ARROW_H / 2.0 + 1.5),
+                tail[1] + back[1] * (ARROW_H / 2.0 + 1.5),
+            ];
+            let bx = [
+                lc[0] - tw / 2.0 - 0.5,
+                lc[1] - ARROW_H / 2.0 - 0.5,
+                lc[0] + tw / 2.0 + 0.5,
+                lc[1] + ARROW_H / 2.0 + 0.5,
+            ];
+            let mut line: Vec<P2> = Vec::new();
+            sample_line(tip, tail, &mut line);
+            let clash = hit(bx, &obstacles, &boxes)
+                || line.iter().any(|p| {
+                    boxes
+                        .iter()
+                        .any(|b| p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3])
+                });
+            if !clash || gap > 60.0 {
+                ar.tip = tip;
+                ar.tail = tail;
+                ar.at = [lc[0] - tw / 2.0, lc[1] - ARROW_H / 2.0];
+                boxes.push(bx);
+                for q in [tip, tail] {
+                    margin[0] = margin[0].max(1.0 - q[0]);
+                    margin[1] = margin[1].max(1.0 - q[1]);
+                    margin[2] = margin[2].max(q[0] + 1.0 - w);
+                    margin[3] = margin[3].max(q[1] + 1.0 - h);
+                }
+                margin[0] = margin[0].max(1.0 - bx[0]);
+                margin[1] = margin[1].max(1.0 - bx[1]);
+                margin[2] = margin[2].max(bx[2] + 1.0 - w);
+                margin[3] = margin[3].max(bx[3] + 1.0 - h);
+                break;
+            }
+            gap += 2.0;
+        }
+    }
+    if matches!(v.place, Place::Aux(_)) {
+        margin[3] += ARROW_H + 2.0;
+    }
     v.margin = margin;
 }
 
@@ -1325,6 +1574,8 @@ pub struct Plan {
     /// Paper origin per view (model (0, 0)), and the isometric's scale.
     pub origins: Vec<P2>,
     pub iso_scale: f64,
+    /// The auxiliary views' scale: the main one, or the next that fits.
+    pub aux_scale: f64,
 }
 
 fn table_h(bends: usize) -> f64 {
@@ -1346,178 +1597,233 @@ fn plan(
     let info_h = table_h(bends).max(note_lines as f64 * NOTE_PITCH + 2.0);
     let n = views.len();
     let iso = n - 1;
-    for s in SCALES {
-        for v in views.iter_mut().take(iso) {
-            let lo = dims::layout(&v.feat, s, lang);
-            v.layout = Some(lo);
-            place_extras(v, s);
+    let has_aux = views.iter().any(|v| matches!(v.place, Place::Aux(_)));
+    // Auxiliary views go to the cells the principal views leave free:
+    // a corner between two used lines first, then a cell beside the
+    // front view, then any corner.
+    let mut cells: Vec<(usize, usize)> = Vec::new();
+    {
+        let mut used: Vec<(usize, usize)> = Vec::new();
+        for v in views[..iso].iter() {
+            let c = match v.place {
+                Place::Left => (0, 1),
+                Place::Right => (2, 1),
+                Place::Above => (1, 0),
+                Place::Below => (1, 2),
+                _ => (1, 1),
+            };
+            if !matches!(v.place, Place::Aux(_)) {
+                used.push(c);
+            }
         }
-        for paper in Paper::ALL {
-            let [x0, y0, x1, y1] = paper.view_area(info_h);
-            let (aw, ah) = (x1 - x0, y1 - y0);
-            // Column and row of each view.
-            let col = |p: Place| match p {
-                Place::Left => 0,
-                Place::Right => 2,
-                _ => 1,
-            };
-            let row = |p: Place| match p {
-                Place::Above => 0,
-                Place::Below => 2,
-                _ => 1,
-            };
-            // Cell needs: width = left margin + w·s + right margin.
-            let mut col_w = [0.0f64; 4];
-            let mut row_h = [0.0f64; 4];
-            let mut col_left = [0.0f64; 4];
-            let mut row_bottom = [0.0f64; 4];
-            let mut col_used = [false; 4];
-            let mut row_used = [false; 4];
-            for v in views[..iso].iter() {
-                let (c, r) = (col(v.place), row(v.place));
-                col_used[c] = true;
-                row_used[r] = true;
-                col_left[c] = col_left[c].max(v.margin[0]);
-                row_bottom[r] = row_bottom[r].max(v.margin[1]);
-            }
-            for v in views[..iso].iter() {
-                let (c, r) = (col(v.place), row(v.place));
-                col_w[c] = col_w[c].max(col_left[c] + v.w() * s + v.margin[2]);
-                row_h[r] = row_h[r].max(row_bottom[r] + v.h() * s + v.margin[3]);
-            }
-            // The isometric: a free corner, else a column of its own.
-            let iso_v = &views[iso];
-            let iso_sizes = |sc: f64| (iso_v.w() * sc + 4.0, iso_v.h() * sc + 4.0 + ISO_TITLE_H);
-            let mut iso_cell: Option<(usize, usize)> = None;
-            for (r, c) in [(2usize, 2usize), (0, 2), (2, 0), (0, 0)] {
-                if row_used[r] && col_used[c] {
-                    iso_cell = Some((r, c));
-                    break;
-                }
-            }
-            // The isometric wants half the main scale; a corner takes it
-            // when it fits, else the corner's column and row grow to it,
-            // else it shrinks to the corner.
-            let target = SCALES
-                .iter()
-                .copied()
-                .find(|sc| *sc <= s / 2.0 + 1e-9)
-                .unwrap_or(s);
-            let fits_in = |sc: f64, r: usize, c: usize, cw: &[f64; 4], rh: &[f64; 4]| {
-                let (iw, ih) = iso_sizes(sc);
-                iw <= cw[c] && ih <= rh[r]
-            };
-            let total = |cw: &[f64; 4], rh: &[f64; 4], cu: &[bool; 4], ru: &[bool; 4]| {
-                let w: f64 = (0..3).filter(|c| cu[*c]).map(|c| cw[c]).sum::<f64>()
-                    + GAP * (cu[..3].iter().filter(|u| **u).count() as f64 - 1.0);
-                let h: f64 = (0..3).filter(|r| ru[*r]).map(|r| rh[r]).sum::<f64>()
-                    + GAP * (ru[..3].iter().filter(|u| **u).count() as f64 - 1.0);
-                (w, h)
-            };
-            let (iso_r, iso_c) = match iso_cell {
-                Some(rc) => rc,
-                None => {
-                    if col_used[2] {
-                        (2, 2)
-                    } else {
-                        (1, 2)
-                    }
-                }
-            };
-            let mut iso_scale = 0.0;
-            if iso_cell.is_some() && fits_in(target, iso_r, iso_c, &col_w, &row_h) {
-                iso_scale = target;
-            } else {
-                let (iw, ih) = iso_sizes(target);
-                let mut cw = col_w;
-                let mut rh = row_h;
-                let mut cu = col_used;
-                let mut ru = row_used;
-                cu[iso_c] = true;
-                ru[iso_r] = true;
-                cw[iso_c] = cw[iso_c].max(iw);
-                rh[iso_r] = rh[iso_r].max(ih);
-                let (w, h) = total(&cw, &rh, &cu, &ru);
-                if w <= aw && h <= ah {
-                    iso_scale = target;
-                    col_w = cw;
-                    row_h = rh;
-                    col_used = cu;
-                    row_used = ru;
-                } else if iso_cell.is_some() {
-                    for sc in SCALES.iter().copied().filter(|sc| *sc < target) {
-                        if fits_in(sc, iso_r, iso_c, &col_w, &row_h) {
-                            iso_scale = sc;
-                            break;
-                        }
-                    }
-                } else {
-                    for sc in SCALES.iter().copied().filter(|sc| *sc < target) {
-                        let (iw, ih) = iso_sizes(sc);
-                        let mut cw = col_w;
-                        let mut rh = row_h;
-                        cw[iso_c] = cw[iso_c].max(iw);
-                        rh[iso_r] = rh[iso_r].max(ih);
-                        let (w, h) = total(&cw, &rh, &cu, &ru);
-                        if w <= aw && h <= ah {
-                            iso_scale = sc;
-                            col_w = cw;
-                            row_h = rh;
-                            col_used = cu;
-                            row_used = ru;
-                            break;
-                        }
-                    }
-                }
-            }
-            let need_w: f64 = (0..3)
-                .filter(|c| col_used[*c])
-                .map(|c| col_w[c])
-                .sum::<f64>()
-                + GAP * (col_used[..3].iter().filter(|u| **u).count() as f64 - 1.0);
-            let need_h: f64 = (0..3)
-                .filter(|r| row_used[*r])
-                .map(|r| row_h[r])
-                .sum::<f64>()
-                + GAP * (row_used[..3].iter().filter(|u| **u).count() as f64 - 1.0);
-            if need_w > aw || need_h > ah {
+        let col_used = |c: usize, used: &[(usize, usize)]| used.iter().any(|u| u.0 == c);
+        let row_used = |r: usize, used: &[(usize, usize)]| used.iter().any(|u| u.1 == r);
+        for v in views[..iso].iter() {
+            if !matches!(v.place, Place::Aux(_)) {
+                cells.push((9, 9));
                 continue;
             }
-            // Positions: columns left to right, rows top to bottom.
-            let mut col_x = [0.0f64; 4];
-            let mut x = x0 + (aw - need_w) / 2.0;
-            for c in 0..3 {
-                if col_used[c] {
-                    col_x[c] = x;
-                    x += col_w[c] + GAP;
+            let order = [
+                (2, 2),
+                (0, 2),
+                (2, 0),
+                (0, 0),
+                (1, 2),
+                (1, 0),
+                (2, 1),
+                (0, 1),
+            ];
+            let pick = order
+                .iter()
+                .copied()
+                .filter(|c| !used.contains(c))
+                .find(|&(c, r)| col_used(c, &used) && row_used(r, &used))
+                .or_else(|| order.iter().copied().find(|c| !used.contains(c)))
+                .unwrap_or((0, 0));
+            used.push(pick);
+            cells.push(pick);
+        }
+    }
+    for s in SCALES {
+        for s_aux in SCALES.iter().copied().filter(|x| *x <= s + 1e-9) {
+            if !has_aux && (s_aux - s).abs() > 1e-9 {
+                break;
+            }
+            let sc_of = |p: Place| if matches!(p, Place::Aux(_)) { s_aux } else { s };
+            for v in views.iter_mut().take(iso) {
+                let sc = sc_of(v.place);
+                let lo = dims::layout(&v.feat, sc, lang);
+                v.layout = Some(lo);
+                place_extras(v, sc);
+            }
+            for paper in Paper::ALL {
+                let [x0, y0, x1, y1] = paper.view_area(info_h);
+                let (aw, ah) = (x1 - x0, y1 - y0);
+                // Column and row of each view.
+                let cell = |i: usize| -> (usize, usize) {
+                    match views[i].place {
+                        Place::Left => (0, 1),
+                        Place::Right => (2, 1),
+                        Place::Above => (1, 0),
+                        Place::Below => (1, 2),
+                        Place::Aux(_) => cells[i],
+                        _ => (1, 1),
+                    }
+                };
+                // Cell needs: width = left margin + w·s + right margin.
+                let mut col_w = [0.0f64; 4];
+                let mut row_h = [0.0f64; 4];
+                let mut col_left = [0.0f64; 4];
+                let mut row_bottom = [0.0f64; 4];
+                let mut col_used = [false; 4];
+                let mut row_used = [false; 4];
+                for (i, v) in views[..iso].iter().enumerate() {
+                    let (c, r) = cell(i);
+                    col_used[c] = true;
+                    row_used[r] = true;
+                    col_left[c] = col_left[c].max(v.margin[0]);
+                    row_bottom[r] = row_bottom[r].max(v.margin[1]);
                 }
-            }
-            let mut row_y = [0.0f64; 4];
-            let mut y = y1 - (ah - need_h) / 2.0;
-            for r in 0..3 {
-                if row_used[r] {
-                    row_y[r] = y - row_h[r];
-                    y -= row_h[r] + GAP;
+                for (i, v) in views[..iso].iter().enumerate() {
+                    let (c, r) = cell(i);
+                    let sc = sc_of(v.place);
+                    col_w[c] = col_w[c].max(col_left[c] + v.w() * sc + v.margin[2]);
+                    row_h[r] = row_h[r].max(row_bottom[r] + v.h() * sc + v.margin[3]);
                 }
+                // The isometric: a free corner, else a column of its own.
+                let iso_v = &views[iso];
+                let iso_sizes =
+                    |sc: f64| (iso_v.w() * sc + 4.0, iso_v.h() * sc + 4.0 + ISO_TITLE_H);
+                let mut iso_cell: Option<(usize, usize)> = None;
+                for (r, c) in [(2usize, 2usize), (0, 2), (2, 0), (0, 0)] {
+                    let taken = (0..iso).any(|i| cell(i) == (c, r));
+                    if row_used[r] && col_used[c] && !taken {
+                        iso_cell = Some((r, c));
+                        break;
+                    }
+                }
+                // The isometric wants half the main scale; a corner takes it
+                // when it fits, else the corner's column and row grow to it,
+                // else it shrinks to the corner.
+                let target = SCALES
+                    .iter()
+                    .copied()
+                    .find(|sc| *sc <= s / 2.0 + 1e-9)
+                    .unwrap_or(s);
+                let fits_in = |sc: f64, r: usize, c: usize, cw: &[f64; 4], rh: &[f64; 4]| {
+                    let (iw, ih) = iso_sizes(sc);
+                    iw <= cw[c] && ih <= rh[r]
+                };
+                let total = |cw: &[f64; 4], rh: &[f64; 4], cu: &[bool; 4], ru: &[bool; 4]| {
+                    let w: f64 = (0..3).filter(|c| cu[*c]).map(|c| cw[c]).sum::<f64>()
+                        + GAP * (cu[..3].iter().filter(|u| **u).count() as f64 - 1.0);
+                    let h: f64 = (0..3).filter(|r| ru[*r]).map(|r| rh[r]).sum::<f64>()
+                        + GAP * (ru[..3].iter().filter(|u| **u).count() as f64 - 1.0);
+                    (w, h)
+                };
+                let (iso_r, iso_c) = match iso_cell {
+                    Some(rc) => rc,
+                    None => [(2usize, 2usize), (2, 1), (2, 0), (0, 2), (0, 1), (0, 0)]
+                        .into_iter()
+                        .find(|&(r, c)| !(0..iso).any(|i| cell(i) == (c, r)))
+                        .unwrap_or((2, 2)),
+                };
+                let mut iso_scale = 0.0;
+                if iso_cell.is_some() && fits_in(target, iso_r, iso_c, &col_w, &row_h) {
+                    iso_scale = target;
+                } else {
+                    let (iw, ih) = iso_sizes(target);
+                    let mut cw = col_w;
+                    let mut rh = row_h;
+                    let mut cu = col_used;
+                    let mut ru = row_used;
+                    cu[iso_c] = true;
+                    ru[iso_r] = true;
+                    cw[iso_c] = cw[iso_c].max(iw);
+                    rh[iso_r] = rh[iso_r].max(ih);
+                    let (w, h) = total(&cw, &rh, &cu, &ru);
+                    if w <= aw && h <= ah {
+                        iso_scale = target;
+                        col_w = cw;
+                        row_h = rh;
+                        col_used = cu;
+                        row_used = ru;
+                    } else if iso_cell.is_some() {
+                        for sc in SCALES.iter().copied().filter(|sc| *sc < target) {
+                            if fits_in(sc, iso_r, iso_c, &col_w, &row_h) {
+                                iso_scale = sc;
+                                break;
+                            }
+                        }
+                    } else {
+                        for sc in SCALES.iter().copied().filter(|sc| *sc < target) {
+                            let (iw, ih) = iso_sizes(sc);
+                            let mut cw = col_w;
+                            let mut rh = row_h;
+                            cw[iso_c] = cw[iso_c].max(iw);
+                            rh[iso_r] = rh[iso_r].max(ih);
+                            let (w, h) = total(&cw, &rh, &cu, &ru);
+                            if w <= aw && h <= ah {
+                                iso_scale = sc;
+                                col_w = cw;
+                                row_h = rh;
+                                col_used = cu;
+                                row_used = ru;
+                                break;
+                            }
+                        }
+                    }
+                }
+                let need_w: f64 = (0..3)
+                    .filter(|c| col_used[*c])
+                    .map(|c| col_w[c])
+                    .sum::<f64>()
+                    + GAP * (col_used[..3].iter().filter(|u| **u).count() as f64 - 1.0);
+                let need_h: f64 = (0..3)
+                    .filter(|r| row_used[*r])
+                    .map(|r| row_h[r])
+                    .sum::<f64>()
+                    + GAP * (row_used[..3].iter().filter(|u| **u).count() as f64 - 1.0);
+                if need_w > aw || need_h > ah {
+                    continue;
+                }
+                // Positions: columns left to right, rows top to bottom.
+                let mut col_x = [0.0f64; 4];
+                let mut x = x0 + (aw - need_w) / 2.0;
+                for c in 0..3 {
+                    if col_used[c] {
+                        col_x[c] = x;
+                        x += col_w[c] + GAP;
+                    }
+                }
+                let mut row_y = [0.0f64; 4];
+                let mut y = y1 - (ah - need_h) / 2.0;
+                for r in 0..3 {
+                    if row_used[r] {
+                        row_y[r] = y - row_h[r];
+                        y -= row_h[r] + GAP;
+                    }
+                }
+                let mut origins = Vec::with_capacity(n);
+                for i in 0..iso {
+                    let (c, r) = cell(i);
+                    origins.push([col_x[c] + col_left[c], row_y[r] + row_bottom[r]]);
+                }
+                // The isometric centred in its cell.
+                let (iw, ih) = iso_sizes(iso_scale);
+                origins.push([
+                    col_x[iso_c] + (col_w[iso_c] - iw) / 2.0 + 2.0,
+                    row_y[iso_r] + (row_h[iso_r] - ih) / 2.0 + 2.0,
+                ]);
+                return Ok(Plan {
+                    paper,
+                    s,
+                    info_h,
+                    origins,
+                    iso_scale,
+                    aux_scale: s_aux,
+                });
             }
-            let mut origins = Vec::with_capacity(n);
-            for v in views[..iso].iter() {
-                let (c, r) = (col(v.place), row(v.place));
-                origins.push([col_x[c] + col_left[c], row_y[r] + row_bottom[r]]);
-            }
-            // The isometric centred in its cell.
-            let (iw, ih) = iso_sizes(iso_scale);
-            origins.push([
-                col_x[iso_c] + (col_w[iso_c] - iw) / 2.0 + 2.0,
-                row_y[iso_r] + (row_h[iso_r] - ih) / 2.0 + 2.0,
-            ]);
-            return Ok(Plan {
-                paper,
-                s,
-                info_h,
-                origins,
-                iso_scale,
-            });
         }
     }
     Err("the views fit no sheet, not even A3 at 1:100".into())
@@ -1719,7 +2025,13 @@ pub fn sheet(
     let iso = views.len() - 1;
     for (i, view) in views.iter().enumerate() {
         let o = p.origins[i];
-        let sv = if i == iso { p.iso_scale } else { s };
+        let sv = if i == iso {
+            p.iso_scale
+        } else if matches!(view.place, Place::Aux(_)) {
+            p.aux_scale
+        } else {
+            s
+        };
         if i == iso && sv <= 0.0 {
             continue;
         }
@@ -1789,7 +2101,7 @@ pub fn sheet(
             };
             c.text([o[0], o[1] - 2.0 - 3.5], 3.5, 0.0, &title);
             view_reports.push(ViewReport {
-                name: Place::Iso.name().into(),
+                name: Place::Iso.name(),
                 r: view.proj.basis.r,
                 u: view.proj.basis.u,
                 d: view.proj.basis.d,
@@ -1799,11 +2111,35 @@ pub fn sheet(
                 size: view.feat.max,
                 angles: vec![],
                 tags: vec![],
+                partial: None,
             });
             continue;
         }
         let lo = view.layout.as_ref().unwrap();
         dims::draw(lo, &view.feat, &mut c, o);
+        if let Place::Aux(k) = view.place {
+            let mut title = format!("{} {}", lang.t("view"), Place::letter(k));
+            if (sv - s).abs() > 1e-9 {
+                title.push(' ');
+                title.push_str(&text::scale(sv));
+            }
+            let top = o[1] + view.feat.max[1] * sv + view.margin[3] - ARROW_H;
+            c.text([o[0], top], ARROW_H * 0.7, 0.0, &title);
+        }
+        // Arrows of auxiliary views (ISO 128-30).
+        c.width(NARROW);
+        for ar in &view.arrows {
+            let tail = [o[0] + ar.tail[0], o[1] + ar.tail[1]];
+            let tip = [o[0] + ar.tip[0], o[1] + ar.tip[1]];
+            c.line(tail, tip);
+            arrow(&mut c, tip, ar.dir);
+            c.text(
+                [o[0] + ar.at[0], o[1] + ar.at[1]],
+                ARROW_H,
+                0.0,
+                &ar.letter.to_string(),
+            );
+        }
         // Angle dimensions.
         c.width(NARROW);
         let mut angle_reports = Vec::new();
@@ -1890,7 +2226,7 @@ pub fn sheet(
         for co in &lo.callouts {
             dimensions.push(DimReport {
                 kind: co.kind.into(),
-                axis: Some(view.place.name().into()),
+                axis: Some(view.place.name()),
                 value: co.value,
                 text: co.text.clone(),
                 count: Some(co.count),
@@ -1898,7 +2234,8 @@ pub fn sheet(
             });
         }
         view_reports.push(ViewReport {
-            name: view.place.name().into(),
+            name: view.place.name(),
+            partial: view.zone.clone(),
             r: view.proj.basis.r,
             u: view.proj.basis.u,
             d: view.proj.basis.d,

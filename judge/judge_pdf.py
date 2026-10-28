@@ -32,7 +32,8 @@ JSON the dossier was drawn from, `<views>/<name>.view.json`, instead:
 * every bend is in the table, numbered on a view, and a bend that is not
   90° has its angle written at the bend;
 * the views sit in first-angle arrangement: the left view right of the
-  front view, the top view below it;
+  front view, the top view below it; an auxiliary view (`partial`) is
+  judged on its zone's faces alone;
 * the sheet's size line and the collisions and PDF/A checks above.
 
 One line of JSON per file; the exit code is the number of files that
@@ -408,21 +409,62 @@ def round_holes(solid):
     return out
 
 
+def zone_solid(solid, zone):
+    """The faces of one zone, with only the edges, vertices and
+    surfaces they use: what a partial view shows."""
+    faces = [f for f in solid["faces"] if f.get("zoneId") == zone]
+    edge_ids = sorted({le["edge"] for f in faces for lp in f["loops"] for le in lp})
+    emap = {e: i for i, e in enumerate(edge_ids)}
+    edges = [solid["edges"][i] for i in edge_ids]
+    vertex_ids = sorted({e["start"] for e in edges} | {e["end"] for e in edges})
+    vmap = {v: i for i, v in enumerate(vertex_ids)}
+    edges = [{**e, "start": vmap[e["start"]], "end": vmap[e["end"]]} for e in edges]
+    surfaces = [solid["surfaces"][f["surface"]] for f in faces]
+    faces = [
+        {
+            **f,
+            "surface": i,
+            "loops": [[{**le, "edge": emap[le["edge"]]} for le in lp] for lp in f["loops"]],
+        }
+        for i, f in enumerate(faces)
+    ]
+    return {
+        "vertices": [solid["vertices"][i] for i in vertex_ids],
+        "curves": solid["curves"],
+        "edges": edges,
+        "surfaces": surfaces,
+        "faces": faces,
+    }
+
+
 def view_candidates(solid, r, u, d, origin):
     """Every value an ordinate of this view may show, per axis: vertices,
     circle centres and extremes, and the corners where two edge-on planes
     meet, as local coordinates from the view's origin."""
     pts = [tuple(p) for p in solid["vertices"]]
-    for c in solid["curves"]:
+    # The part's extent: vertices and the extremes of full circles (an
+    # arc's circle may reach past the metal).
+    on_metal = len(pts)
+    extremes = []
+    for e in solid["edges"]:
+        c = solid["curves"][e["curve"]]
         if c["kind"] != "circle":
             continue
         cc, cr, ca = tuple(c["center"]), c["radius"], unit(c["axis"])
-        pts.append(cc)
+        full = e["start"] == e["end"]
         for a in (r, u):
             s = math.sqrt(max(0.0, 1.0 - dot(ca, a) ** 2))
-            pts.append((cc[0] + a[0] * cr * s, cc[1] + a[1] * cr * s, cc[2] + a[2] * cr * s))
-            pts.append((cc[0] - a[0] * cr * s, cc[1] - a[1] * cr * s, cc[2] - a[2] * cr * s))
+            for sg in (1.0, -1.0):
+                q = (cc[0] + a[0] * cr * s * sg, cc[1] + a[1] * cr * s * sg, cc[2] + a[2] * cr * s * sg)
+                if full:
+                    pts.insert(on_metal, q)
+                    on_metal += 1
+                else:
+                    extremes.append(q)
+        extremes.append(cc)
+    pts += extremes
     local = [(dot(p, r) - dot(origin, r), dot(p, u) - dot(origin, u)) for p in pts]
+    metal = local[:on_metal]
     # Edge-on planes and the long straight edges as lines in the view,
     # and their pairwise corners (near the edges' own span).
     lines = []
@@ -488,7 +530,12 @@ def view_candidates(solid, r, u, d, origin):
             corners.append((p[0] + a[0] * t, p[1] + a[1] * t))
     xs = {v[0] for v in local}
     ys = {v[1] for v in local}
-    extent = (min(xs), max(xs), min(ys), max(ys))
+    extent = (
+        min(v[0] for v in metal),
+        max(v[0] for v in metal),
+        min(v[1] for v in metal),
+        max(v[1] for v in metal),
+    )
     xs |= {c[0] for c in corners}
     ys |= {c[1] for c in corners}
     return xs, ys, extent
@@ -527,7 +574,11 @@ def folded_problems(sheet, view, words):
         rh = cross(r, u)
         if abs(dot(rh, d) - 1.0) > 1e-6:
             problems.append(f"view {v['name']}: frame is not right-handed")
-        xs, ys, extent = view_candidates(solid, r, u, d, o)
+        shown = zone_solid(solid, v["partial"]) if v.get("partial") else solid
+        if not shown["faces"]:
+            problems.append(f"view {v['name']}: zone {v['partial']!r} has no faces")
+            continue
+        xs, ys, extent = view_candidates(shown, r, u, d, o)
         for dim in sheet["dimensions"]:
             if dim["kind"] != "ordinate" or not dim["axis"].startswith(v["name"] + ":"):
                 continue
