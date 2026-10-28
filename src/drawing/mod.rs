@@ -22,7 +22,9 @@ use crate::view::{Pose, View};
 pub mod dims;
 pub mod features;
 pub mod flat;
+pub mod folded;
 pub mod logo;
+pub mod project;
 pub mod sheet;
 pub mod text;
 
@@ -162,7 +164,8 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     // Group the parts by blank, keeping the view's order.
     struct Group {
         part_ids: Vec<String>,
-        blank: blank::Blank,
+        blank: Option<blank::Blank>,
+        solid: usize,
         material: String,
         thickness: f64,
     }
@@ -175,15 +178,35 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
             groups[i].part_ids.push(p.id);
             continue;
         }
-        let Some(solid) = view.solids.iter().find(|s| s.id == p.solid) else {
+        let Some(si) = view.solids.iter().position(|s| s.id == p.solid) else {
             return Err(format!("part {} points at unknown solid {}", p.id, p.solid));
         };
+        let solid = &view.solids[si];
+        if solid.mesh.is_none() && folded::is_folded(solid) {
+            if p.mirror || (p.scale - 1.0).abs() > 1e-9 {
+                skipped.push(Skipped {
+                    id: p.id,
+                    message: "a mirrored or scaled folded part is not drawn yet".into(),
+                });
+                continue;
+            }
+            by_blank.insert(key, groups.len());
+            groups.push(Group {
+                part_ids: vec![p.id],
+                blank: None,
+                solid: si,
+                material: p.material,
+                thickness: p.thickness,
+            });
+            continue;
+        }
         match blank::flat_blank(solid, p.mirror, p.scale) {
             Ok(b) => {
                 by_blank.insert(key, groups.len());
                 groups.push(Group {
                     part_ids: vec![p.id],
-                    blank: b,
+                    blank: Some(b),
+                    solid: si,
                     material: p.material,
                     thickness: p.thickness,
                 });
@@ -196,7 +219,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     }
     if groups.is_empty() {
         return Err(format!(
-            "no part has a flat pattern ({})",
+            "no part can be drawn ({})",
             skipped
                 .iter()
                 .map(|s| format!("{}: {}", s.id, s.message))
@@ -233,8 +256,11 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
             material: &g.material,
             thickness: g.thickness,
         };
-        let report = flat::sheet(&mut doc, &g.blank, &info, meta, lang)
-            .map_err(|e| format!("part {}: {e}", g.part_ids[0]))?;
+        let report = match &g.blank {
+            Some(b) => flat::sheet(&mut doc, b, &info, meta, lang),
+            None => folded::sheet(&mut doc, &view.solids[g.solid], &info, meta, lang),
+        }
+        .map_err(|e| format!("part {}: {e}", g.part_ids[0]))?;
         let name = if g.part_ids.len() > 1 {
             format!(
                 "{} · {} ({}×)",

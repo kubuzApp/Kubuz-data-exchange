@@ -105,7 +105,7 @@ fn overlap(a: [f64; 4], b: [f64; 4]) -> bool {
 }
 
 /// Points along a model segment, in paper mm, about one per millimetre.
-fn sample(seg: &Seg, s: f64, out: &mut Vec<P2>) {
+pub(crate) fn sample(seg: &Seg, s: f64, out: &mut Vec<P2>) {
     match *seg {
         Seg::Line { a, b } => sample_line([a[0] * s, a[1] * s], [b[0] * s, b[1] * s], out),
         Seg::Arc { c, r, start, end } => {
@@ -127,7 +127,7 @@ fn sample(seg: &Seg, s: f64, out: &mut Vec<P2>) {
     }
 }
 
-fn sample_line(a: P2, b: P2, out: &mut Vec<P2>) {
+pub(crate) fn sample_line(a: P2, b: P2, out: &mut Vec<P2>) {
     let n = (dist(a, b).ceil() as usize).max(1);
     for i in 0..=n {
         let t = i as f64 / n as f64;
@@ -438,6 +438,23 @@ fn x_text_bottom(l: &Label, lo: &Layout) -> f64 {
 
 fn y_text_right(l: &Label, lo: &Layout) -> f64 {
     -D - 3.0 - l.level as f64 * (lo.y_lmax + 2.0)
+}
+
+/// Paper boxes of the running dimensions' texts, relative to the model
+/// origin, for whoever places more text on the view.
+pub fn label_boxes(lo: &Layout) -> Vec<[f64; 4]> {
+    let mut v = Vec::new();
+    for l in &lo.xs {
+        let bottom = x_text_bottom(l, lo);
+        let w = font::width(&l.text, H);
+        v.push([l.p - 0.5 - H, bottom, l.p - 0.5, bottom + w]);
+    }
+    for l in &lo.ys {
+        let right = y_text_right(l, lo);
+        let w = font::width(&l.text, H);
+        v.push([right - w, l.p + 0.5, right, l.p + 0.5 + H]);
+    }
+    v
 }
 
 /// A closed filled arrowhead with its tip at `tip`, pointing along `u`.

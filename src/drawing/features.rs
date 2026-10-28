@@ -162,6 +162,11 @@ pub fn features(blank: &Blank) -> Features {
                 }
             }
         }
+        // A line with another running back the other way closer than a
+        // relief is the side of a slit or a thin tab: its ends are minor.
+        let narrow: Vec<bool> = (0..n)
+            .map(|i| narrow_line(lp, &len, i, minor_edge))
+            .collect();
         for i in 0..n {
             if in_curve[i] {
                 continue;
@@ -229,7 +234,10 @@ pub fn features(blank: &Blank) -> Features {
                         && tangent_at[(i + n - 1) % n]
                         && is_fillet(lp, (i + n - 1) % n);
                     if !fillet_before {
-                        let minor = lp_len.min(len[i]) < minor_edge && !in_curve[(i + n - 1) % n];
+                        let minor = (lp_len.min(len[i]) < minor_edge
+                            || narrow[i]
+                            || narrow[(i + n - 1) % n])
+                            && !in_curve[(i + n - 1) % n];
                         if minor {
                             f.minor += 1;
                         }
@@ -241,6 +249,33 @@ pub fn features(blank: &Blank) -> Features {
                     }
                 }
                 Seg::Circle { .. } => {}
+            }
+        }
+        // A run of short edges between two long lines is a relief or a
+        // notch: the lines' theoretical corner is dimensioned instead.
+        if li == outer && minor_edge > 0.0 {
+            let short: Vec<bool> = (0..n)
+                .map(|i| len[i] < minor_edge && !in_curve[i])
+                .collect();
+            if !short.iter().all(|&b| b) {
+                for (first, rl) in runs(&short) {
+                    let before = &lp[(first + n - 1) % n];
+                    let after = &lp[(first + rl) % n];
+                    let Some(p) = intersection(before, after) else {
+                        continue;
+                    };
+                    let near = (0..rl).any(|k| {
+                        let (a, b) = ends(&lp[(first + k) % n]);
+                        dist(a, p) <= 2.0 * minor_edge || dist(b, p) <= 2.0 * minor_edge
+                    });
+                    if near {
+                        f.corners.push(Corner {
+                            p,
+                            virtual_: true,
+                            minor: false,
+                        });
+                    }
+                }
             }
         }
         // The free-form runs.
@@ -362,6 +397,46 @@ fn outer_loop(loops: &[Vec<Seg>]) -> usize {
         }
     }
     best.0
+}
+
+/// Whether line `i` has an antiparallel line of the loop closer than
+/// `bound` beside it over at least half its length.
+fn narrow_line(lp: &[Seg], len: &[f64], i: usize, bound: f64) -> bool {
+    let Seg::Line { a, b } = lp[i] else {
+        return false;
+    };
+    let l = len[i];
+    if bound <= 0.0 || l < 1e-9 {
+        return false;
+    }
+    let u = [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
+    lp.iter().enumerate().any(|(j, s)| {
+        if j == i {
+            return false;
+        }
+        let Seg::Line { a: c, b: e } = *s else {
+            return false;
+        };
+        if len[j] < 1e-9 {
+            return false;
+        }
+        let v = [(e[0] - c[0]) / len[j], (e[1] - c[1]) / len[j]];
+        if u[0] * v[0] + u[1] * v[1] > -0.996 {
+            return false;
+        }
+        let off = ((c[0] - a[0]) * u[1] - (c[1] - a[1]) * u[0]).abs();
+        if off >= bound {
+            return false;
+        }
+        let t0 = (c[0] - a[0]) * u[0] + (c[1] - a[1]) * u[1];
+        let t1 = (e[0] - a[0]) * u[0] + (e[1] - a[1]) * u[1];
+        let (lo, hi) = (t0.min(t1).max(0.0), t0.max(t1).min(l));
+        hi - lo >= 0.5 * l
+    })
+}
+
+fn dist(a: P2, b: P2) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 
 fn seg_len(s: &Seg) -> f64 {

@@ -56,8 +56,9 @@ export type DrawingMeta = {
 };
 
 export type DrawingDimension = {
-  kind: "ordinate" | "diameter" | "radius";
-  axis?: "x" | "y";
+  kind: "ordinate" | "diameter" | "radius" | "angle";
+  /** `x` or `y` on a flat sheet; `<view>:x` or `<view>:y` on a folded one. */
+  axis?: string;
   value: number;
   text: string;
   count?: number;
@@ -71,6 +72,26 @@ export type DrawingBend = {
   direction: "up" | "down";
   insideRadius: number;
   allowance: number;
+};
+
+/** One view of a folded part on its sheet. */
+export type DrawingView = {
+  name: "front" | "left" | "right" | "top" | "bottom" | "isometric";
+  /** The view's frame in part coordinates: right, up and towards the viewer. */
+  r: [number, number, number];
+  u: [number, number, number];
+  d: [number, number, number];
+  /** The part point at the view's lower-left corner, where its ordinates start. */
+  originWorld: [number, number, number];
+  /** That corner on the sheet, in mm from the lower left. */
+  origin: [number, number];
+  scaleFactor: number;
+  /** The view's extent in part millimetres. */
+  size: [number, number];
+  /** Bend angles written on this view (bends that are not 90°). */
+  angles: { bend: number; value: number; text: string }[];
+  /** Bend numbers tagged on this view. */
+  tags: number[];
 };
 
 /** One sheet of the dossier: the blank that `partIds` share, `quantity` times. */
@@ -89,6 +110,14 @@ export type DrawingSheet = {
   thickness: number;
   dimensions: DrawingDimension[];
   bends: DrawingBend[];
+  /** `flat`: the flat pattern; `folded`: orthographic views of the folded part. */
+  kind: "flat" | "folded";
+  /** Folded sheets: the part's L × W × H. */
+  size?: [number, number, number];
+  /** Folded sheets: the views drawn. */
+  views?: DrawingView[];
+  /** Folded sheets: edges shorter than this were treated as reliefs. */
+  minorBound?: number;
 };
 
 export type DrawingsResult =

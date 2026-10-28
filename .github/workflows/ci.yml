@@ -52,24 +52,30 @@ jobs:
           done
           python -I judge/judge.py out/*.step
       # The flat fixtures are also written as DXF and read back by ezdxf.
+      # A folded fixture only yields DXF for the flat plates in it, and
+      # may yield none at all.
       - name: Write and judge every flat pattern
         run: |
-          for v in fixtures/*_flat*.view.json; do
+          for v in fixtures/*.view.json; do
             n=$(basename "$v" .view.json)
-            target/release/examples/view2dxf "$v" "out/dxf/$n"
+            case "$n" in mesh_*) continue;; esac
+            if ! target/release/examples/view2dxf "$v" "out/dxf/$n"; then
+              case "$n" in *_flat*) exit 1;; esac
+            fi
           done
           python -I judge/judge_dxf.py out/dxf/*/*.dxf
-      # And drawn as a PDF/A-2b dossier, judged against the DXF: every
-      # feature dimensioned, no invented numbers, no text collisions,
-      # veraPDF PASS.
+      # And drawn as a PDF/A-2b dossier, judged against the DXF (flat
+      # sheets) or the view (folded sheets): every feature dimensioned, no
+      # invented numbers, no text collisions, veraPDF PASS.
       - name: Draw and judge every dossier
         run: |
           mkdir -p out/pdf
-          for v in fixtures/*_flat*.view.json; do
+          for v in fixtures/*.view.json; do
             n=$(basename "$v" .view.json)
+            case "$n" in mesh_*|four_down_mirrored) continue;; esac
             target/release/examples/view2pdf "$v" "out/pdf/$n.pdf"
           done
-          python -I judge/judge_pdf.py --dxf out/dxf --verapdf verapdf.jar out/pdf/*.pdf
+          python -I judge/judge_pdf.py --dxf out/dxf --views fixtures --verapdf verapdf.jar out/pdf/*.pdf
 
   package:
     name: Package

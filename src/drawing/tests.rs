@@ -36,9 +36,60 @@ fn parts_sharing_a_blank_share_a_sheet() {
 }
 
 #[test]
-fn a_folded_view_is_refused_with_the_reason() {
-    let err = write_drawings(&view("four_down"), &Meta::default()).unwrap_err();
-    assert!(err.contains("no flat pattern"), "{err}");
+fn every_folded_fixture_becomes_a_sheet_with_views_and_bends() {
+    for (name, bends, views) in [
+        ("four_down", 8, 3),
+        ("hex_pan", 6, 2),
+        ("mixed_channel", 2, 3),
+        ("deck_splash", 3, 3),
+        ("short_flange", 1, 3),
+        ("roll_tube", 0, 3),
+    ] {
+        let out = write_drawings(&view(name), &Meta::default()).unwrap();
+        let s = &out.sheets[0];
+        assert_eq!(s.kind, "folded", "{name}");
+        assert_eq!(s.bends.len(), bends, "{name}");
+        assert_eq!(
+            s.views.len(),
+            views,
+            "{name}: {:?}",
+            s.views.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+        assert!(s.size.is_some(), "{name}");
+        assert!(out.pdf.len() / out.sheets.len() < 45_000, "{name}");
+        // Every view's frame is right-handed and the extents are dimensioned.
+        for v in &s.views {
+            let [r, u, d] = [v.r, v.u, v.d];
+            let c = [
+                r[1] * u[2] - r[2] * u[1],
+                r[2] * u[0] - r[0] * u[2],
+                r[0] * u[1] - r[1] * u[0],
+            ];
+            assert!(
+                (c[0] * d[0] + c[1] * d[1] + c[2] * d[2] - 1.0).abs() < 1e-6,
+                "{name} {}",
+                v.name
+            );
+        }
+        let ords = s.dimensions.iter().filter(|d| d.kind == "ordinate").count();
+        assert!(ords >= 6, "{name}: {ords} ordinates");
+    }
+}
+
+#[test]
+fn a_mesh_view_is_refused_with_the_reason() {
+    let err = write_drawings(&view("mesh_cube"), &Meta::default()).unwrap_err();
+    assert!(err.contains("no part can be drawn"), "{err}");
+    // A mirrored folded part is skipped with a message, not drawn.
+    let out = write_drawings(&view("four_down_mirrored"), &Meta::default());
+    match out {
+        Ok(o) => assert!(
+            o.skipped.iter().any(|m| m.message.contains("mirrored")),
+            "{:?}",
+            o.skipped.iter().map(|m| &m.message).collect::<Vec<_>>()
+        ),
+        Err(e) => assert!(e.contains("no part can be drawn"), "{e}"),
+    }
     let bad = write_drawings_json("{}", "{}").unwrap_err();
     assert!(bad.starts_with("view:"), "{bad}");
     let bad_meta = write_drawings_json(

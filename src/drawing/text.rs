@@ -62,7 +62,7 @@ const LABELS: &[(&str, [&str; 3])] = &[
     ("format", ["Formaat", "Paper size", "Format"]),
     ("tolerances", ["Algemene toleranties", "General tolerances", "Tolérances générales"]),
     ("projection", ["Projectiemethode", "Projection method", "Méthode de projection"]),
-    ("blank", ["Blank L × B", "Blank L × W", "Flan L × l"]),
+    ("blank", ["Afmeting L × B × H", "Size L × W × H", "Encombrement L × l × H"]),
     ("flat", ["AFWIKKELING", "FLAT PATTERN", "DÉVELOPPÉ"]),
     (
         "flat_sub",
@@ -112,6 +112,36 @@ const LABELS: &[(&str, [&str; 3])] = &[
             "Vrije vorm: alleen eind- en uiterste punten bemaat, verloop volgens DXF.",
             "Free-form contour: only its ends and extreme points are dimensioned, shape per DXF.",
             "Contour libre : seuls les extrémités et points extrêmes sont cotés, forme selon DXF.",
+        ],
+    ),
+    ("size", ["Afmeting", "Size", "Encombrement"]),
+    ("isometric", ["ISOMETRIE", "ISOMETRIC", "ISOMÉTRIE"]),
+    (
+        "outside_note",
+        [
+            "Buitenmaten, lopend vanaf de hoek linksonder van elk aanzicht.",
+            "Outside dimensions, running from the lower-left corner of each view.",
+            "Cotes extérieures, cumulées depuis le coin inférieur gauche de chaque vue.",
+        ],
+    ),
+    (
+        "radius_note",
+        ["Binnenradius plooien", "Inside bend radius", "Rayon intérieur des plis"],
+    ),
+    (
+        "angle_note",
+        [
+            "Plooihoek = afwijking t.o.v. vlak; 90° niet aangeduid. OP = naar de buitenhuid toe.",
+            "Bend angle = deviation from flat; 90° not marked. UP = towards the outer skin.",
+            "Angle de pli = écart par rapport au plat ; 90° non coté. HAUT = vers la peau extérieure.",
+        ],
+    ),
+    (
+        "minor_note_folded",
+        [
+            "Ontlastingen en inkepingen aan de plooien: niet bemaat, volgens afwikkeling.",
+            "Bend reliefs and notches: not dimensioned, per flat pattern.",
+            "Dégagements et encoches aux plis : non cotés, selon le développé.",
         ],
     ),
     ("dossier", ["Tekeningendossier", "Drawing dossier", "Dossier de dessins"]),

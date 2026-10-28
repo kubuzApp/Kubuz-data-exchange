@@ -11,13 +11,29 @@ its own reader, and never trusts the report for a fact it can check:
 * every font is embedded, the file carries an output intent and a
   language, and veraPDF passes it as PDF/A-2b when a jar is given;
 * every dimension the report claims is printed on the page as it says;
-* every printed ordinate is a coordinate of the DXF (no invented numbers);
+* every printed ordinate is a coordinate of the DXF, or the corner two
+  long cut lines make past a relief (no invented numbers);
 * every hole centre, bend-line end and blank extent in the DXF is
   dimensioned;
 * every hole diameter has a callout counting the holes of that size;
 * every bend line has a numbered tag;
 * no two texts overlap, and no line runs through a text;
 * the file stays small: 24 KB plus 4 KB a page.
+
+A folded sheet (kind "folded" in the report) is judged against the view
+JSON the dossier was drawn from, `<views>/<name>.view.json`, instead:
+
+* every printed ordinate is, in its view's frame, a coordinate of a
+  vertex, a hole centre, a circle's extreme point or the corner where two
+  edge-on faces meet (no invented numbers);
+* every view's chain runs from 0 to the far side of the part;
+* every round hole in a face a view looks straight at is located on both
+  axes somewhere on the sheet and has a diameter callout;
+* every bend is in the table, numbered on a view, and a bend that is not
+  90° has its angle written at the bend;
+* the views sit in first-angle arrangement: the left view right of the
+  front view, the top view below it;
+* the sheet's size line and the collisions and PDF/A checks above.
 
 One line of JSON per file; the exit code is the number of files that
 failed.
@@ -127,6 +143,30 @@ def dxf_coordinates(d, centres=True):
         take(a)
         take(b)
     return xs, ys
+
+
+def virtual_corners(d, bound):
+    """Where two long CUT lines would meet if extended a little past a
+    relief or notch between them: the theoretical corner a drawing
+    dimensions instead of the relief's own ends."""
+    spans = []
+    for a, b in d["lines"]:
+        l = math.dist(a, b)
+        if l < bound:
+            continue
+        spans.append((a, ((b[0] - a[0]) / l, (b[1] - a[1]) / l), l))
+    out = []
+    for i in range(len(spans)):
+        for j in range(i + 1, len(spans)):
+            (p, u, lp), (q, v, lq) = spans[i], spans[j]
+            den = u[0] * v[1] - u[1] * v[0]
+            if abs(den) < 1e-6:
+                continue
+            t = ((q[0] - p[0]) * v[1] - (q[1] - p[1]) * v[0]) / den
+            s2 = ((q[0] - p[0]) * u[1] - (q[1] - p[1]) * u[0]) / den
+            if -2 * bound <= t <= lp + 2 * bound and -2 * bound <= s2 <= lq + 2 * bound:
+                out.append((p[0] + u[0] * t, p[1] + u[1] * t))
+    return out
 
 
 def dxf_extent(d):
@@ -291,7 +331,289 @@ def verapdf(jar, path):
 # --- The judge --------------------------------------------------------------
 
 
-def judge(path, dxf_root, jar):
+def collision_problems(page, texts, prob, tag):
+    """No two texts overlap, and no line runs through a text."""
+    boxes = [(t, box) for t, box, _ in texts]
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            if boxes_overlap(shrink(boxes[i][1], 0.1), shrink(boxes[j][1], 0.1)):
+                prob(f"{tag}: texts {boxes[i][0]!r} and {boxes[j][0]!r} overlap")
+    segs = page_segments(page)
+    for t, box in boxes:
+        inner = shrink(box, 0.25)
+        if inner[0] >= inner[2] or inner[1] >= inner[3]:
+            continue
+        n = sum(1 for s in segs if seg_hits_box(s, inner))
+        if n:
+            prob(f"{tag}: {n} line(s) run through {t!r} at ({box[0]:.1f}, {box[1]:.1f})")
+
+
+# --- Folded sheets -----------------------------------------------------------
+
+
+def dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def unit(v):
+    n = math.sqrt(dot(v, v)) or 1.0
+    return (v[0] / n, v[1] / n, v[2] / n)
+
+
+def canon(axis):
+    """A world axis and its sign, so that +x and -x share one entry."""
+    k = max(range(3), key=lambda i: abs(axis[i]))
+    if axis[k] < 0:
+        return (-axis[0], -axis[1], -axis[2]), -1.0
+    return tuple(axis), 1.0
+
+
+def solid_of(view, sheet):
+    part = next(p for p in view["parts"] if p["id"] == sheet["partIds"][0])
+    return next(s for s in view["solids"] if s["id"] == part["solid"])
+
+
+def round_holes(solid):
+    """(centre, radius, outward normal) of every round hole or tube end
+    in a planar skin face: an inner loop whose edges are all circles of one
+    centre and radius."""
+    out = []
+    for f in solid["faces"]:
+        if f["role"] not in ("outerSkin", "innerSkin"):
+            continue
+        surf = solid["surfaces"][f["surface"]]
+        if surf["kind"] != "plane":
+            continue
+        n = unit(surf["normal"])
+        if not f.get("sameSense", True):
+            n = (-n[0], -n[1], -n[2])
+        for lp in f["loops"][1:]:
+            circles = []
+            for le in lp:
+                e = solid["edges"][le["edge"]]
+                c = solid["curves"][e["curve"]]
+                if c["kind"] != "circle":
+                    circles = None
+                    break
+                circles.append((tuple(c["center"]), c["radius"]))
+            if not circles:
+                continue
+            c0, r0 = circles[0]
+            if all(math.dist(c, c0) < 1e-3 and abs(r - r0) < 1e-3 for c, r in circles):
+                out.append((c0, r0, n))
+    return out
+
+
+def view_candidates(solid, r, u, d, origin):
+    """Every value an ordinate of this view may show, per axis: vertices,
+    circle centres and extremes, and the corners where two edge-on planes
+    meet, as local coordinates from the view's origin."""
+    pts = [tuple(p) for p in solid["vertices"]]
+    for c in solid["curves"]:
+        if c["kind"] != "circle":
+            continue
+        cc, cr, ca = tuple(c["center"]), c["radius"], unit(c["axis"])
+        pts.append(cc)
+        for a in (r, u):
+            s = math.sqrt(max(0.0, 1.0 - dot(ca, a) ** 2))
+            pts.append((cc[0] + a[0] * cr * s, cc[1] + a[1] * cr * s, cc[2] + a[2] * cr * s))
+            pts.append((cc[0] - a[0] * cr * s, cc[1] - a[1] * cr * s, cc[2] - a[2] * cr * s))
+    local = [(dot(p, r) - dot(origin, r), dot(p, u) - dot(origin, u)) for p in pts]
+    # Edge-on planes and the long straight edges as lines in the view,
+    # and their pairwise corners (near the edges' own span).
+    lines = []
+    spans = []
+    # A cylinder seen along a line across its axis shows its two
+    # silhouette generators, a radius out from the axis on either side.
+    for surf in solid["surfaces"]:
+        if surf["kind"] != "cylinder":
+            continue
+        ax = unit(surf["axis"])
+        if abs(dot(ax, d)) > 1e-6:
+            continue
+        side = unit(cross(ax, d))
+        o = surf["origin"]
+        for sg in (1.0, -1.0):
+            q = (o[0] + side[0] * surf["radius"] * sg, o[1] + side[1] * surf["radius"] * sg, o[2] + side[2] * surf["radius"] * sg)
+            lines.append(((dot(q, r) - dot(origin, r), dot(q, u) - dot(origin, u)), (dot(ax, r), dot(ax, u))))
+    ext = max(max(v[0] for v in local) - min(v[0] for v in local), max(v[1] for v in local) - min(v[1] for v in local))
+    bound = min(max(0.02 * ext, 6.0), 25.0)
+    for e in solid["edges"]:
+        c = solid["curves"][e["curve"]]
+        if c["kind"] == "bspline":
+            # A straight B-spline (a ruled face's edge) counts as a line.
+            cp = c["controlPoints"]
+            a, b = cp[0], cp[-1]
+            ab = unit((b[0] - a[0], b[1] - a[1], b[2] - a[2]))
+            if any(math.dist(q, (a[0] + ab[0] * dot((q[0] - a[0], q[1] - a[1], q[2] - a[2]), ab),
+                                a[1] + ab[1] * dot((q[0] - a[0], q[1] - a[1], q[2] - a[2]), ab),
+                                a[2] + ab[2] * dot((q[0] - a[0], q[1] - a[1], q[2] - a[2]), ab))) > 1e-3 for q in cp):
+                continue
+        elif c["kind"] != "line":
+            continue
+        a, b = solid["vertices"][e["start"]], solid["vertices"][e["end"]]
+        pa = (dot(a, r) - dot(origin, r), dot(a, u) - dot(origin, u))
+        pb = (dot(b, r) - dot(origin, r), dot(b, u) - dot(origin, u))
+        l = math.dist(pa, pb)
+        if l < bound:
+            continue
+        spans.append((pa, ((pb[0] - pa[0]) / l, (pb[1] - pa[1]) / l), (-2 * bound, l + 2 * bound)))
+    for surf in solid["surfaces"]:
+        if surf["kind"] != "plane":
+            continue
+        n = unit(surf["normal"])
+        if abs(dot(n, d)) > 1e-6:
+            continue
+        dir3 = unit(cross(d, n))
+        o = surf["origin"]
+        lines.append(((dot(o, r) - dot(origin, r), dot(o, u) - dot(origin, u)), (dot(dir3, r), dot(dir3, u))))
+    corners = []
+    allv = [(p, a, None) for p, a in lines] + spans
+    for i in range(len(allv)):
+        for j in range(i + 1, len(allv)):
+            (p, a, sa), (q, b, sb) = allv[i], allv[j]
+            den = a[0] * b[1] - a[1] * b[0]
+            if abs(den) < 1e-6:
+                continue
+            t = ((q[0] - p[0]) * b[1] - (q[1] - p[1]) * b[0]) / den
+            s2 = ((q[0] - p[0]) * a[1] - (q[1] - p[1]) * a[0]) / den
+            if sa and not (sa[0] <= t <= sa[1]):
+                continue
+            if sb and not (sb[0] <= s2 <= sb[1]):
+                continue
+            corners.append((p[0] + a[0] * t, p[1] + a[1] * t))
+    xs = {v[0] for v in local}
+    ys = {v[1] for v in local}
+    extent = (min(xs), max(xs), min(ys), max(ys))
+    xs |= {c[0] for c in corners}
+    ys |= {c[1] for c in corners}
+    return xs, ys, extent
+
+
+def bend_axis(solid, zone):
+    """The axis of the outer-skin cylinder of a bend zone, if any."""
+    for f in solid["faces"]:
+        if f.get("zoneId") == zone and f["role"] == "outerSkin":
+            surf = solid["surfaces"][f["surface"]]
+            if surf["kind"] == "cylinder":
+                return unit(surf["axis"])
+    return None
+
+
+def folded_problems(sheet, view, words):
+    """What is wrong with one folded sheet, given the words on its page."""
+    problems = []
+    solid = solid_of(view, sheet)
+    views = {v["name"]: v for v in sheet["views"]}
+    claimed = {}  # canonical world axis -> set of world values
+
+    def claim(axis, world):
+        c, sign = canon(axis)
+        claimed.setdefault(c, []).append(world * sign)
+
+    def located(axis, world):
+        c, sign = canon(axis)
+        return any(abs(v - world * sign) <= SAME for v in claimed.get(c, []))
+
+    extents = []
+    for v in sheet["views"]:
+        if v["name"] == "isometric":
+            continue
+        r, u, d, o = tuple(v["r"]), tuple(v["u"]), tuple(v["d"]), tuple(v["originWorld"])
+        rh = cross(r, u)
+        if abs(dot(rh, d) - 1.0) > 1e-6:
+            problems.append(f"view {v['name']}: frame is not right-handed")
+        xs, ys, extent = view_candidates(solid, r, u, d, o)
+        for dim in sheet["dimensions"]:
+            if dim["kind"] != "ordinate" or not dim["axis"].startswith(v["name"] + ":"):
+                continue
+            axis = dim["axis"].split(":")[1]
+            val = dim["value"]
+            pool = xs if axis == "x" else ys
+            if not any(abs(val - c) <= SAME for c in pool):
+                problems.append(f"view {v['name']}: ordinate {axis} = {dim['text']} is no coordinate of the part")
+            a = r if axis == "x" else u
+            claim(a, val + dot(o, a))
+        extents.append((v["name"], "x", r, dot(o, r), extent[0], extent[1]))
+        extents.append((v["name"], "y", u, dot(o, u), extent[2], extent[3]))
+        for ang in v.get("angles", []):
+            if ang["text"] not in words:
+                problems.append(f"view {v['name']}: angle {ang['text']!r} not printed")
+
+    # Each view's chains run from 0 to the far side, on this view or on
+    # the one sharing the world axis (a value is dimensioned once).
+    for name, axis, a, o_a, lo, hi in extents:
+        c, sign = canon(a)
+        local = [w * sign - o_a for w in claimed.get(c, [])]
+        if not local:
+            problems.append(f"view {name}: nothing dimensioned along {axis}")
+            continue
+        if min(local) > SAME:
+            problems.append(f"view {name}: {axis} chain starts at {mm_text(min(local))}, not 0")
+        if max(local) < hi - lo - SAME:
+            problems.append(f"view {name}: {axis} chain ends at {mm_text(max(local))} before the far side {mm_text(hi - lo)}")
+
+    # Holes the sheet looks straight at.
+    seen = {}
+    for c, rad, n in round_holes(solid):
+        for v in sheet["views"]:
+            if v["name"] == "isometric" or dot(n, v["d"]) < 0.9999:
+                continue
+            key = (round(c[0], 3), round(c[1], 3), round(c[2], 3), round(rad, 3))
+            if key in seen:
+                continue
+            seen[key] = True
+            for a in (v["r"], v["u"]):
+                if not located(a, dot(c, a)):
+                    problems.append(
+                        f"hole ⌀{mm_text(2 * rad)} at ({mm_text(c[0])}, {mm_text(c[1])}, {mm_text(c[2])}) not located along ({a[0]:g}, {a[1]:g}, {a[2]:g})"
+                    )
+            dia = mm_text(2 * rad)
+            if not any(w == f"⌀{dia}" or (w.endswith(f"× ⌀{dia}")) for w in words):
+                problems.append(f"no callout for ⌀{dia}")
+
+    # Bends: table rows, tags and non-90° angles.
+    tagged = {t for v in sheet["views"] for t in v.get("tags", [])}
+    for b in sheet["bends"]:
+        if b["nr"] not in tagged:
+            problems.append(f"bend {b['nr']} ({b['id']}) tagged on no view")
+        if str(b["nr"]) not in words:
+            problems.append(f"bend {b['nr']}: tag not printed")
+        ang = f"{mm_text(b['angleDeg'])}°"
+        if ang not in words:
+            problems.append(f"bend {b['nr']}: angle {ang!r} not in the table")
+        drawn = any(a["bend"] == b["nr"] for v in sheet["views"] for a in v.get("angles", []))
+        axis = bend_axis(solid, b["id"])
+        along = axis is not None and any(
+            v["name"] != "isometric" and abs(dot(axis, v["d"])) > 0.9999 for v in sheet["views"]
+        )
+        if abs(b["angleDeg"] - 90.0) > 0.05 and along and not drawn:
+            problems.append(f"bend {b['nr']}: {ang} is not 90° yet drawn on no view")
+
+    # First-angle arrangement and the size line.
+    front = views.get("front")
+    if front:
+        if "left" in views and views["left"]["origin"][0] <= front["origin"][0]:
+            problems.append("left view is not right of the front view")
+        if "right" in views and views["right"]["origin"][0] >= front["origin"][0]:
+            problems.append("right view is not left of the front view")
+        if "top" in views and views["top"]["origin"][1] >= front["origin"][1]:
+            problems.append("top view is not below the front view")
+        if "bottom" in views and views["bottom"]["origin"][1] <= front["origin"][1]:
+            problems.append("bottom view is not above the front view")
+    size = sheet.get("size")
+    if size:
+        want = " × ".join(mm_text(x) for x in size)
+        if not any(want in w for w in words):
+            problems.append(f"size {want!r} not printed")
+    return problems
+
+
+def judge(path, dxf_root, jar, views_root=None):
     out = {"file": path, "ok": True, "problems": []}
     prob = out["problems"].append
     report_path = path[:-4] + ".report.json"
@@ -339,6 +661,19 @@ def judge(path, dxf_root, jar):
             if d["text"] not in words:
                 prob(f"{tag}: claimed {d['text']!r} is not printed")
 
+        if sheet.get("kind") == "folded":
+            view_path = os.path.join(views_root or "", name + ".view.json")
+            try:
+                with open(view_path, encoding="utf-8") as f:
+                    view = json.load(f)
+            except OSError as e:
+                prob(f"{tag}: view: {e}")
+                continue
+            for p in folded_problems(sheet, view, words):
+                prob(f"{tag}: {p}")
+            collision_problems(page, texts, prob, tag)
+            continue
+
         # Claims and must-haves against the DXF.
         dxf_path = os.path.join(dxf_dir, sheet["partIds"][0] + ".dxf")
         try:
@@ -348,6 +683,10 @@ def judge(path, dxf_root, jar):
             continue
         xs, ys = dxf_coordinates(d)
         (x_lo, x_hi), (y_lo, y_hi) = dxf_extent(d)
+        bound = min(max(0.02 * max(x_hi - x_lo, y_hi - y_lo), 6.0), 25.0)
+        for cx, cy in virtual_corners(d, bound):
+            xs.add(round(cx, 3))
+            ys.add(round(cy, 3))
         claimed = {"x": [], "y": []}
         for dim in sheet["dimensions"]:
             if dim["kind"] != "ordinate":
@@ -399,20 +738,7 @@ def judge(path, dxf_root, jar):
         if len(sheet["bends"]) != len(d["bends"]):
             prob(f"{tag}: {len(sheet['bends'])} bends in the table, {len(d['bends'])} lines in the DXF")
 
-        # Collisions.
-        boxes = [(t, box) for t, box, _ in texts]
-        for i in range(len(boxes)):
-            for j in range(i + 1, len(boxes)):
-                if boxes_overlap(shrink(boxes[i][1], 0.1), shrink(boxes[j][1], 0.1)):
-                    prob(f"{tag}: texts {boxes[i][0]!r} and {boxes[j][0]!r} overlap")
-        segs = page_segments(page)
-        for t, box in boxes:
-            inner = shrink(box, 0.25)
-            if inner[0] >= inner[2] or inner[1] >= inner[3]:
-                continue
-            n = sum(1 for s in segs if seg_hits_box(s, inner))
-            if n:
-                prob(f"{tag}: {n} line(s) run through {t!r} at ({box[0]:.1f}, {box[1]:.1f})")
+        collision_problems(page, texts, prob, tag)
 
     if out["problems"]:
         out["ok"] = False
@@ -424,10 +750,11 @@ def main():
     ap.add_argument("pdfs", nargs="+")
     ap.add_argument("--dxf", required=True, help="folder holding <name>/<part>.dxf per dossier")
     ap.add_argument("--verapdf", help="veraPDF greenfield-apps jar; validates PDF/A-2b when given")
+    ap.add_argument("--views", help="folder holding <name>.view.json for folded dossiers")
     args = ap.parse_args()
     failed = 0
     for path in args.pdfs:
-        result = judge(path, args.dxf, args.verapdf)
+        result = judge(path, args.dxf, args.verapdf, args.views)
         print(json.dumps(result, ensure_ascii=False))
         if not result["ok"]:
             failed += 1

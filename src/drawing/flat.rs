@@ -42,6 +42,15 @@ pub struct SheetReport {
     pub thickness: f64,
     pub dimensions: Vec<DimReport>,
     pub bends: Vec<BendReport>,
+    /// `flat` or `folded`.
+    pub kind: String,
+    /// Overall size of a folded part along the front view's frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<super::folded::ViewReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minor_bound: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -348,6 +357,10 @@ pub fn sheet(
         thickness: info.thickness,
         dimensions,
         bends: bend_reports,
+        kind: "flat".into(),
+        size: None,
+        views: vec![],
+        minor_bound: None,
     })
 }
 
