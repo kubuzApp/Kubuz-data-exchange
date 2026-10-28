@@ -203,5 +203,18 @@ function base64ToBytes(b64: string): Uint8Array {
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
   }
-  return new Uint8Array(Buffer.from(b64, "base64"));
+  // No atob (an old runtime): decode by hand.
+  const T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const clean = b64.replace(/[^A-Za-z0-9+/]/g, "");
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let o = 0;
+  for (let i = 0; i < clean.length; i += 4) {
+    const have = Math.min(4, clean.length - i);
+    const v = (k: number) => (k < have ? T.indexOf(clean[i + k]) : 0);
+    const n = (v(0) << 18) | (v(1) << 12) | (v(2) << 6) | v(3);
+    out[o++] = (n >> 16) & 255;
+    if (have > 2) out[o++] = (n >> 8) & 255;
+    if (have > 3) out[o++] = n & 255;
+  }
+  return out.subarray(0, o);
 }
