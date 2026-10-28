@@ -4,7 +4,7 @@
  *
  * ```ts
  * import { exactGeometry } from "@kubuzapp/kernel";
- * import { exportDxf, exportStep } from "@kubuzapp/data-exchange";
+ * import { exportDrawings, exportDxf, exportStep } from "@kubuzapp/data-exchange";
  *
  * const view = await exactGeometry(programJson);
  * if (view.ok) {
@@ -15,6 +15,8 @@
  * if (flat.ok) {
  *   const out = await exportDxf(flat.view);
  *   if (out.ok) for (const f of out.files) download(`${f.name}.dxf`, f.dxf);
+ *   const dossier = await exportDrawings(flat.view, { date: "2026-10-28", title: "Worktable" });
+ *   if (dossier.ok) download("worktable-drawings.pdf", dossier.pdfBytes());
  * }
  * ```
  */
@@ -31,10 +33,81 @@ export type DxfResult =
   | { ok: true; files: DxfFile[]; skipped: { id: string; message: string }[] }
   | { ok: false; error: string };
 
+/** What the CPQ knows and the drawings do not. Every field is optional. */
+export type DrawingMeta = {
+  /** Legal owner (ISO 7200): the title block's name when there is no logo. Default "Kubuz". */
+  owner?: string;
+  createdBy?: string;
+  approvedBy?: string;
+  /** `YYYY-MM-DD`. */
+  date?: string;
+  /** The dossier's title: the configuration or the order. */
+  title?: string;
+  /** Drawing number prefix; each sheet is `<number>-<position>`. */
+  number?: string;
+  revision?: string;
+  status?: string;
+  /** `nl` (default), `en` or `fr`. */
+  language?: string;
+  /** The general tolerance note. Default "ISO 2768-mK". */
+  tolerances?: string;
+  /** The owner's logo as SVG path data (M L H V C S Q T Z; no arcs), drawn in the title block. */
+  logo?: { width: number; height: number; paths: { d: string; fill?: string }[] };
+};
+
+export type DrawingDimension = {
+  kind: "ordinate" | "diameter" | "radius";
+  axis?: "x" | "y";
+  value: number;
+  text: string;
+  count?: number;
+  sources: string[];
+};
+
+export type DrawingBend = {
+  nr: number;
+  id: string;
+  angleDeg: number;
+  direction: "up" | "down";
+  insideRadius: number;
+  allowance: number;
+};
+
+/** One sheet of the dossier: the blank that `partIds` share, `quantity` times. */
+export type DrawingSheet = {
+  index: number;
+  label: string;
+  title: string;
+  partIds: string[];
+  quantity: number;
+  paper: "A4" | "A3";
+  scale: string;
+  scaleFactor: number;
+  origin: [number, number];
+  blank: [number, number];
+  material: string;
+  thickness: number;
+  dimensions: DrawingDimension[];
+  bends: DrawingBend[];
+};
+
+export type DrawingsResult =
+  | {
+      ok: true;
+      /** The PDF/A-2b file, base64. */
+      pdf: string;
+      sheets: DrawingSheet[];
+      skipped: { id: string; message: string }[];
+      /** The PDF as bytes, for a Blob or a file. */
+      pdfBytes: () => Uint8Array;
+    }
+  | { ok: false; error: string };
+
 type WasmModule = {
   default: (moduleOrPath?: unknown) => Promise<unknown>;
   exportStep: (viewJson: string, name: string) => string;
   exportDxf: (viewJson: string) => string;
+  exportDrawings: (viewJson: string, metaJson: string) => string;
 };
 
 export type InitOptions = {
@@ -97,4 +170,38 @@ export async function exportDxf(view: object | string, options?: InitOptions): P
   const text = typeof view === "string" ? view : JSON.stringify(view);
   const mod = await initDataExchange(options);
   return JSON.parse(mod.exportDxf(text)) as DxfResult;
+}
+
+/**
+ * Write a dossier of ISO detail drawings, as one PDF/A-2b file, from a flat
+ * exact-geometry view (`exactGeometry` with `folded` false): one sheet per
+ * distinct sheet blank, with the flat pattern seen from the outer skin,
+ * running dimensions from the lower-left corner, hole and radius callouts,
+ * numbered bend lines with a bend table, and an ISO 7200 title block. The
+ * sheet (A4 or A3) and the scale are the smallest and largest that fit.
+ * Every sheet comes back described in `sheets`, dimension by dimension.
+ * Parts with no flat pattern are listed under `skipped`.
+ */
+export async function exportDrawings(
+  view: object | string,
+  meta: DrawingMeta = {},
+  options?: InitOptions,
+): Promise<DrawingsResult> {
+  const text = typeof view === "string" ? view : JSON.stringify(view);
+  const mod = await initDataExchange(options);
+  const result = JSON.parse(mod.exportDrawings(text, JSON.stringify(meta))) as DrawingsResult;
+  if (result.ok) {
+    result.pdfBytes = () => base64ToBytes(result.pdf);
+  }
+  return result;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  if (typeof atob === "function") {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  return new Uint8Array(Buffer.from(b64, "base64"));
 }

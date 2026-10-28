@@ -5,3 +5,5 @@
 /judge/.venv
 *.step
 !fixtures/*.step
+/tools/fonttool/target
+__pycache__/

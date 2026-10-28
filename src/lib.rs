@@ -5,8 +5,9 @@
 //! surfaces and faces, plus the parts that place them. The kernel writes
 //! it; this crate turns it into files. It knows nothing about sheet metal.
 //!
-//! Formats today: STEP AP214 ([`step`]) and DXF flat patterns ([`dxf`]).
-//! More come as the CPQ needs them.
+//! Formats today: STEP AP214 ([`step`]), DXF flat patterns ([`dxf`]) and a
+//! PDF dossier of ISO detail drawings ([`drawing`]). More come as the CPQ
+//! needs them.
 //!
 //! Besides the kernel's exact solids, a solid may be a closed triangle
 //! `mesh` (a glTF model, an OpenSCAD part): it is written as planar faces
@@ -19,11 +20,14 @@
 //! std::fs::write("worktable.step", file).unwrap();
 //! ```
 
+pub mod drawing;
 pub mod dxf;
 pub mod mesh;
+pub mod pdf;
 pub mod step;
 pub mod view;
 
+pub use drawing::{write_drawings, write_drawings_json};
 pub use dxf::{write_dxf, write_dxf_json};
 pub use step::{write_step, write_step_json};
 
@@ -48,6 +52,19 @@ mod wasm {
     #[wasm_bindgen(js_name = exportDxf)]
     pub fn export_dxf(view_json: &str) -> String {
         let v = match crate::dxf::write_dxf_json(view_json) {
+            Ok(out) => out.to_json(),
+            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+        };
+        v.to_string()
+    }
+
+    /// A PDF dossier of detail drawings from a flat view's JSON text and
+    /// the meta's (`{}` for the defaults). Returns JSON: `{ "ok": true,
+    /// "pdf": "<base64>", "sheets": [...], "skipped": [...] }` or
+    /// `{ "ok": false, "error" }`.
+    #[wasm_bindgen(js_name = exportDrawings)]
+    pub fn export_drawings(view_json: &str, meta_json: &str) -> String {
+        let v = match crate::drawing::write_drawings_json(view_json, meta_json) {
             Ok(out) => out.to_json(),
             Err(e) => serde_json::json!({ "ok": false, "error": e }),
         };

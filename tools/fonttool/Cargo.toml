@@ -1,0 +1,14 @@
+# Not part of the crate: run by hand to regenerate src/pdf/osifont-subset.ttf
+# and src/pdf/glyphs.rs after changing the character list in src/main.rs.
+#   cargo run --release -- ../../osifont-lgpl3fe.ttf ../../src/pdf
+[package]
+name = "fonttool"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+subsetter = "0.2"
+ttf-parser = "0.25"

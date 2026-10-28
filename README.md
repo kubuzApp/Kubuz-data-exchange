@@ -1,8 +1,9 @@
 # Kubuz data exchange
 
 File formats written from the Kubuz kernel's **exact-geometry view**. Today
-that is STEP (ISO 10303-21, AP214) of the folded parts and DXF (R12) flat
-patterns of the sheet blanks. More formats come as the CPQ needs them.
+that is STEP (ISO 10303-21, AP214) of the folded parts, DXF (R12) flat
+patterns of the sheet blanks, and a PDF/A dossier of ISO detail drawings,
+one sheet per blank. More formats come as the CPQ needs them.
 
 The kernel knows sheet metal: it turns a programme into exact faces (planes,
 cylinders, ruled spline strips) and edges (lines, circles, cubic splines),
@@ -96,6 +97,77 @@ Two things the kernel never writes, but an app may add to a view:
   placements are rigid, so such a part gets its own solid with the pose
   baked in (loops reversed, circles turned round, ruled faces flipped).
   Shear and non-uniform scale are refused.
+
+### PDF drawing dossier
+
+A workshop still wants paper: a detail drawing per part, with the flat
+pattern, its dimensions, the bend table and a title block. `exportDrawings`
+draws them from the same flat view, as one PDF/A-2b file:
+
+```ts
+const flat = await exactGeometry(programJson, undefined, false);
+if (flat.ok) {
+  const dossier = await exportDrawings(flat.view, {
+    owner: "Kubuz",
+    createdBy: "Kubuz CPQ",
+    date: "2026-10-28",
+    title: "Worktable",
+    number: "KB-2026-0412",
+    language: "nl",
+    logo: { width: 120, height: 40, paths: [{ d: "M0 0H120V40H0Z", fill: "#003366" }] },
+  });
+  if (dossier.ok) saveAs("worktable-drawings.pdf", dossier.pdfBytes());
+}
+```
+
+Every distinct blank gets a sheet (parts that share a blank share a sheet;
+`quantity` says how many to make), on A4 portrait or A3 landscape, at the
+largest ISO 5455 scale that fits. The sheet follows ISO 5457 (frame,
+centring and trimming marks, the A3 grid reference), the title block ISO
+7200 (180 mm: owner or logo, title, identification number, made by, approved
+by, date, material, thickness, quantity, document type, status, revision,
+scale, sheet, format, general tolerances, projection symbol, blank size),
+the lines ISO 128-2 (0,5 outline, 0,25 the rest), the lettering ISO 3098
+(osifont, embedded as a subset), the dimensions ISO 129-1 running dimensions
+from the lower-left corner of the blank, so the operator reads every
+position straight off the sheet.
+
+What the drafter puts on the sheet, and the exporter does too:
+
+- **running dimensions** on both axes for every corner of the outline, the
+  sharp corner a fillet replaced, every hole centre and every bend line;
+  values closer than 3,6 mm on paper take a further row of labels;
+- **callouts** `⌀d` and `R` next to the feature when the paper around it
+  is free (never over a line or another text), else in a column at the
+  right; equal sizes are counted, `4× ⌀9`;
+- **numbered bend lines** with a table of angle (deviation from flat), direction
+  (`OP` towards the viewer, `NEER` away: the view is the outer skin), inside
+  radius and bend allowance; the V-opening is the press-brake operator's
+  choice and is not written;
+- **reliefs, notches and small rounds** on the outline are not dimensioned
+  (the laser cuts them from the DXF) and the notes say so; a cutout is a
+  feature at any size;
+- a **free-form contour** (a run of tangent arcs, or a polyline standing in
+  for a curve) is dimensioned by its ends and extreme points only, with a
+  note that the shape is in the DXF.
+
+Numbers are written to a tenth with a decimal comma and no trailing zero
+(`45,5`, `36`). The notes are in Dutch, English or French (`language`).
+The dossier has bookmarks and page labels (`Pos 1`, `Pos 2`, …), and it is
+small: about 20 KB for the font and 1 to 3 KB a sheet, fully vector.
+
+Besides the file the export describes every sheet (`sheets`): paper, scale,
+where the blank sits, material, and every dimension with the features it
+came from, so an outside judge can rebuild the part from the drawing alone.
+Parts with no flat pattern are listed under `skipped`.
+
+From the command line:
+
+```
+cargo run --example view2pdf -- four_down_flat.view.json out.pdf meta.json
+```
+
+In Rust: `kubuz_data_exchange::write_drawings_json(&view_json, &meta_json)`.
 
 ## The view
 
@@ -191,6 +263,22 @@ no text, and that the `CUT` entities close into loops.
 ```
 pip install ezdxf==1.4.5
 python -I judge/judge_dxf.py out/*.dxf
+```
+
+The drawings have the strictest judge: [`judge/judge_pdf.py`](judge/judge_pdf.py)
+reads each dossier back with PyMuPDF and pikepdf, and the flat patterns it
+drew with its own DXF reader, and checks that every page is an ISO sheet,
+every font is embedded, every dimension the export claims is printed, every
+printed ordinate is a coordinate of the blank, every hole centre, bend-line
+end and blank extent is dimensioned, every hole size has its callout, every
+bend its numbered tag, no two texts overlap, no line runs through a text,
+the file stays under 24 KB plus 4 KB a page, and veraPDF passes it as
+PDF/A-2b. CI runs it over every flat fixture.
+
+```
+pip install pymupdf pikepdf
+curl -sSfLO https://repo1.maven.org/maven2/org/verapdf/apps/greenfield-apps/1.28.2/greenfield-apps-1.28.2.jar
+python -I judge/judge_pdf.py --dxf out/dxf --verapdf greenfield-apps-1.28.2.jar out/pdf/*.pdf
 ```
 
 ## Build

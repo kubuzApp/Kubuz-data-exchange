@@ -35,8 +35,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install cadquery-ocp==8.0.1 ezdxf==1.4.5
-      - run: cargo build --release --example view2step --example view2dxf
+      - run: pip install cadquery-ocp==8.0.1 ezdxf==1.4.5 "pymupdf>=1.26" "pikepdf>=9"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Fetch veraPDF
+        run: curl -sSfL -o verapdf.jar https://repo1.maven.org/maven2/org/verapdf/apps/greenfield-apps/1.28.2/greenfield-apps-1.28.2.jar
+      - run: cargo build --release --example view2step --example view2dxf --example view2pdf
       - name: Write and judge every fixture
         run: |
           mkdir -p out
@@ -53,6 +59,17 @@ jobs:
             target/release/examples/view2dxf "$v" "out/dxf/$n"
           done
           python -I judge/judge_dxf.py out/dxf/*/*.dxf
+      # And drawn as a PDF/A-2b dossier, judged against the DXF: every
+      # feature dimensioned, no invented numbers, no text collisions,
+      # veraPDF PASS.
+      - name: Draw and judge every dossier
+        run: |
+          mkdir -p out/pdf
+          for v in fixtures/*_flat*.view.json; do
+            n=$(basename "$v" .view.json)
+            target/release/examples/view2pdf "$v" "out/pdf/$n.pdf"
+          done
+          python -I judge/judge_pdf.py --dxf out/dxf --verapdf verapdf.jar out/pdf/*.pdf
 
   package:
     name: Package

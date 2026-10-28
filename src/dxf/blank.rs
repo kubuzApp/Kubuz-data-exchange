@@ -41,6 +41,9 @@ pub struct BendLine {
     pub angle_deg: f64,
     pub direction: BendDirection,
     pub inside_radius: f64,
+    /// The bend allowance: what the blank is longer by than the two
+    /// flanges' flat lengths.
+    pub allowance: f64,
     pub a: P2,
     pub b: P2,
 }
@@ -171,6 +174,7 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
             angle_deg: b.angle_deg,
             direction: b.direction,
             inside_radius: b.inside_radius * scale,
+            allowance: b.allowance * scale,
             a: to2(b.line[0]),
             b: to2(b.line[1]),
         });
