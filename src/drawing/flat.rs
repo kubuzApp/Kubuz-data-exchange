@@ -56,6 +56,9 @@ pub struct SheetReport {
     /// Folded extents L × W × H along the base flange's axes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extents: Option<[f64; 3]>,
+    /// The isometric pictorial of the folded part, when it found room.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isometric: Option<IsoReport>,
     /// `flat` or `folded`.
     pub kind: String,
     /// Overall size of a folded part along the front view's frame.
@@ -144,6 +147,18 @@ pub struct SectionReport {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct IsoReport {
+    pub scale: String,
+    pub scale_factor: f64,
+    /// Paper position of the picture plane's origin, in mm from the lower
+    /// left corner.
+    pub origin: [f64; 2],
+    /// Paper box of the pictorial.
+    pub bbox: [f64; 4],
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PieceReport {
     /// `flat` or `bend`.
     pub kind: String,
@@ -181,6 +196,9 @@ pub struct Plan {
     pub layout: Layout,
     pub info_h: f64,
     pub sections: Vec<Placed>,
+    /// The isometric pictorial's scale and paper origin, when it fits.
+    pub iso: Option<(f64, P2)>,
+    pub iso_lines: Option<super::iso::Iso>,
 }
 
 fn table_h(bends: usize) -> f64 {
@@ -212,6 +230,15 @@ fn notes(blank: &Blank, f: &Features, info: &SheetInfo, lang: Lang, sections: bo
         text::mm(blank.max[0]),
         text::mm(blank.max[1])
     ));
+    if let Some(e) = section::folded_extents(blank, info.thickness) {
+        v.push(format!(
+            "{}: {} × {} × {}",
+            lang.t("folded_size"),
+            text::mm(e[0]),
+            text::mm(e[1]),
+            text::mm(e[2])
+        ));
+    }
     v.push(lang.t("chain_note").to_string());
     if f.minor > 0 {
         v.push(lang.t("minor_note").to_string());
@@ -232,9 +259,8 @@ fn notes(blank: &Blank, f: &Features, info: &SheetInfo, lang: Lang, sections: bo
     v
 }
 
-/// Choose sheet and scales: the largest scale for the flat pattern first,
-/// then the largest scales for its sections (at most two ISO steps above
-/// the flat pattern's, at most one below), then the smaller sheet.
+/// Choose sheet and scale: the largest scale at which the flat pattern
+/// and its sections (at the same scale) fit, the smaller sheet preferred.
 pub fn plan(
     f: &Features,
     blank: &Blank,
@@ -243,6 +269,7 @@ pub fn plan(
     lang: Lang,
 ) -> Result<Plan, String> {
     let info_h = table_h(blank.bends.len()).max(note_lines as f64 * NOTE_PITCH + 2.0);
+    let iso = super::iso::isometric(blank, t);
     let mut best: Option<(f64, Plan)> = None;
     for s in SCALES {
         for paper in Paper::ALL {
@@ -270,6 +297,8 @@ pub fn plan(
                             layout: lo,
                             info_h,
                             sections: vec![],
+                            iso: None,
+                            iso_lines: None,
                         },
                     ));
                 }
@@ -308,20 +337,10 @@ pub fn plan(
             let mut placed = Vec::new();
             let mut score = 10.0 * s.ln() - if paper == Paper::A3 { 0.01 } else { 0.0 };
             let mut ok = true;
-            // A section may be two ISO steps larger than the flat pattern
-            // and one step smaller.
-            let si = SCALES
-                .iter()
-                .position(|&x| (x - s).abs() < 1e-12)
-                .unwrap_or(0);
-            let floor = SCALES[(si + 1).min(SCALES.len() - 1)];
-            let ceil = SCALES[si.saturating_sub(2)];
+            // The sections share the flat pattern's scale.
             for p in &profiles {
                 let mut choice: Option<(f64, P2, SectionPlan, bool)> = None;
-                for &ss in SCALES
-                    .iter()
-                    .filter(|&&ss| ss >= floor - 1e-12 && ss <= ceil + 1e-12)
-                {
+                for ss in [s] {
                     let sp = section::plan(p, ss);
                     let w = sp.bbox[2] - sp.bbox[0];
                     let h = sp.bbox[3] - sp.bbox[1] + SECTION_TITLE_H;
@@ -356,6 +375,42 @@ pub fn plan(
             if !ok {
                 continue;
             }
+            // The pictorial where room is left, at the flat pattern's
+            // scale or up to two steps smaller; never on a bigger sheet
+            // for its sake.
+            let mut iso_at = None;
+            if let Some(iso) = &iso {
+                for &ss in SCALES
+                    .iter()
+                    .filter(|&&ss| ss <= s + 1e-12 && ss >= s / 4.0 - 1e-12)
+                {
+                    let w = (iso.bbox[2] - iso.bbox[0]) * ss + 2.0;
+                    let h = (iso.bbox[3] - iso.bbox[1]) * ss + SECTION_TITLE_H;
+                    if right_x0 + w <= x1 && right_top - h >= y0 {
+                        iso_at = Some((
+                            ss,
+                            [
+                                right_x0 + 1.0 - iso.bbox[0] * ss,
+                                right_top - h - iso.bbox[1] * ss,
+                            ],
+                        ));
+                        break;
+                    }
+                    if bottom_x + w <= x1 && bottom_y1 - h >= y0 {
+                        iso_at = Some((
+                            ss,
+                            [
+                                bottom_x + 1.0 - iso.bbox[0] * ss,
+                                bottom_y1 - h - iso.bbox[1] * ss,
+                            ],
+                        ));
+                        break;
+                    }
+                }
+            }
+            if iso_at.is_some() {
+                score += 0.005;
+            }
             if best.as_ref().is_none_or(|(b, _)| score > *b + 1e-9) {
                 best = Some((
                     score,
@@ -366,12 +421,20 @@ pub fn plan(
                         layout: lo,
                         info_h,
                         sections: placed,
+                        iso: iso_at,
+                        iso_lines: None,
                     },
                 ));
             }
         }
     }
-    best.map(|(_, p)| p).ok_or_else(|| {
+    best.map(|(_, mut p)| {
+        if p.iso.is_some() {
+            p.iso_lines = iso;
+        }
+        p
+    })
+    .ok_or_else(|| {
         format!(
             "blank of {} × {} mm fits no sheet, not even A3 at 1:100",
             text::mm(f.max[0]),
@@ -383,17 +446,17 @@ pub fn plan(
 /// Weight from the blank's area, thickness and the material's density
 /// (kg/m³), when the meta knows it.
 fn weight(blank: &Blank, f: &Features, t: f64, material: &str, meta: &Meta) -> Option<f64> {
-    let density = *meta.densities.get(material)?;
+    let density = match meta.densities.get(material) {
+        Some(d) => *d,
+        None => density(material)?,
+    };
     if t <= 0.0 {
         return None;
     }
     let outer = super::features::outer_loop(&f.loops);
     let mut area = 0.0;
     for (li, lp) in f.loops.iter().enumerate() {
-        let mut pts = Vec::new();
-        for seg in lp {
-            dims::sample(seg, 1.0, &mut pts);
-        }
+        let pts = super::features::loop_points(lp, 1.0);
         let n = pts.len();
         let mut a = 0.0;
         for i in 0..n {
@@ -409,6 +472,91 @@ fn weight(blank: &Blank, f: &Features, t: f64, material: &str, meta: &Meta) -> O
     }
     let _ = blank;
     Some(area * t * density * 1e-9)
+}
+
+/// Density in kg/m³ of a sheet material by its usual names, when the meta
+/// gives none: steels, stainless steels, aluminium, copper, brass, zinc,
+/// titanium.
+pub fn density(material: &str) -> Option<f64> {
+    let m: String = material
+        .to_ascii_uppercase()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+        .collect();
+    if m.is_empty() {
+        return None;
+    }
+    let has = |needles: &[&str]| needles.iter().any(|n| m.contains(n));
+    let starts = |needles: &[&str]| needles.iter().any(|n| m.starts_with(n));
+    // Stainless before steel: "1.4301" and "304" are not "S355".
+    if has(&["INOX", "RVS", "STAINLESS", "EDELSTAHL"])
+        || starts(&["1.43", "1.44", "1.45", "1.46", "X"])
+        || [
+            "301", "303", "304", "304L", "316", "316L", "316TI", "321", "430", "441", "2205",
+            "2507", "904L",
+        ]
+        .iter()
+        .any(|g| m == *g || m.starts_with(&format!("{g}/")) || m.starts_with(&format!("AISI{g}")))
+    {
+        return Some(if has(&["430", "441", "1.4016", "1.4509"]) {
+            7700.0
+        } else {
+            7900.0
+        });
+    }
+    if has(&["ALU", "ALMG", "ALSI", "ALZN", "ENAW", "EN AW"])
+        || starts(&["AW", "AL", "5754", "5083", "6061", "6082", "1050", "3003"])
+    {
+        return Some(2700.0);
+    }
+    if has(&["CU", "COPPER", "KOPER", "CUIVRE"]) && !has(&["CUZN", "BRASS", "MESSING", "LAITON"]) {
+        return Some(8940.0);
+    }
+    if has(&["CUZN", "BRASS", "MESSING", "LAITON", "MS58", "MS63"]) {
+        return Some(8500.0);
+    }
+    if has(&["ZINC", "ZINK", "TITANZINK"]) {
+        return Some(7140.0);
+    }
+    if has(&["TITAN", "TI6AL4V"]) || starts(&["TI"]) {
+        return Some(4430.0);
+    }
+    if has(&[
+        "S235",
+        "S275",
+        "S355",
+        "DC01",
+        "DC03",
+        "DC04",
+        "DX51",
+        "DX52",
+        "DX53",
+        "DX54",
+        "S250",
+        "S280",
+        "S320",
+        "ST37",
+        "ST52",
+        "HARDOX",
+        "STRENX",
+        "DOMEX",
+        "STEEL",
+        "STAAL",
+        "ACIER",
+        "SENDZIMIR",
+        "ZM",
+        "CORTEN",
+        "S460",
+        "S500",
+        "S700",
+        "QSTE",
+        "GALVA",
+    ]) || starts(&[
+        "1.0", "1.1", "1.2", "1.5", "1.7", "1.8", "S", "DC", "DX", "HX", "HC", "C45", "C",
+    ]) {
+        return Some(7850.0);
+    }
+    None
 }
 
 fn kg(w: f64) -> String {
@@ -472,15 +620,7 @@ pub fn sheet(
         weight: weight(blank, &f, t, info.material, meta)
             .map(kg)
             .unwrap_or_default(),
-        extents: match extents {
-            Some(e) => format!(
-                "{} × {} × {}",
-                text::mm(e[0]),
-                text::mm(e[1]),
-                text::mm(e[2])
-            ),
-            None => format!("{} × {}", text::mm(blank.max[0]), text::mm(blank.max[1])),
-        },
+        extents: format!("{} × {}", text::mm(blank.max[0]), text::mm(blank.max[1])),
     };
     sheet::title_values(&mut c, paper, lang, &tv);
 
@@ -658,6 +798,67 @@ pub fn sheet(
         });
     }
 
+    // The isometric pictorial, thin lines, titled.
+    let mut iso_report = None;
+    if let (Some((ss, io)), Some(iso)) = (p.iso, &p.iso_lines) {
+        c.width(0.35);
+        for pl in &iso.polylines {
+            // Points closer than 0,15 mm on paper add nothing.
+            let mut pts: Vec<P2> = Vec::with_capacity(pl.len());
+            for (i, q) in pl.iter().enumerate() {
+                let q = [io[0] + q[0] * ss, io[1] + q[1] * ss];
+                let keep = match pts.last() {
+                    Some(l) => (q[0] - l[0]).hypot(q[1] - l[1]) >= 0.15 || i + 1 == pl.len(),
+                    None => true,
+                };
+                if keep {
+                    pts.push(q);
+                }
+            }
+            // Nor does a point within 0,05 mm of the line through its
+            // neighbours.
+            let mut simple: Vec<P2> = Vec::with_capacity(pts.len());
+            for (i, q) in pts.iter().enumerate() {
+                if i == 0 || i + 1 == pts.len() {
+                    simple.push(*q);
+                    continue;
+                }
+                let a = *simple.last().unwrap();
+                let b = pts[i + 1];
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len = dx.hypot(dy).max(1e-9);
+                let dev = ((q[0] - a[0]) * dy - (q[1] - a[1]) * dx).abs() / len;
+                if dev >= 0.05 {
+                    simple.push(*q);
+                }
+            }
+            let length: f64 = simple
+                .windows(2)
+                .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+                .sum();
+            if simple.len() >= 2 && length >= 0.3 {
+                c.polyline(&simple, false);
+            }
+        }
+        let mut title = lang.t("isometric").to_string();
+        if (ss - s).abs() > 1e-9 {
+            title.push_str(&format!(" ({})", text::scale(ss)));
+        }
+        let bbox = [
+            io[0] + iso.bbox[0] * ss,
+            io[1] + iso.bbox[1] * ss,
+            io[0] + iso.bbox[2] * ss,
+            io[1] + iso.bbox[3] * ss,
+        ];
+        c.text_centred((bbox[0] + bbox[2]) / 2.0, bbox[3] + 2.0, 4.0, &title);
+        iso_report = Some(IsoReport {
+            scale: text::scale(ss),
+            scale_factor: ss,
+            origin: io,
+            bbox,
+        });
+    }
+
     let (w, h) = paper.size();
     let label = format!("Pos {}", info.index);
     doc.add_page(w, h, &[paper.form_name()], c, &label);
@@ -717,6 +918,7 @@ pub fn sheet(
         bends: bend_reports,
         sections: section_reports,
         extents,
+        isometric: iso_report,
         kind: "flat".into(),
         size: None,
         views: vec![],
@@ -733,7 +935,23 @@ pub(crate) fn draw_loop(c: &mut Content, lp: &[Seg], pm: &impl Fn(P2) -> P2, s: 
         c.circle(pm(*cc), r * s);
         return;
     }
-    let (start, _) = super::features::ends(first);
+    // Enter the first segment at the end the second does not share, so
+    // an arc at the start of the loop runs the loop's way.
+    let (fa, fb) = super::features::ends(first);
+    let start = match lp.get(1) {
+        Some(second) if !matches!(second, Seg::Circle { .. }) => {
+            let (sa, sb) = super::features::ends(second);
+            let near = |p: P2, q: P2| (p[0] - q[0]).abs() + (p[1] - q[1]).abs();
+            let fb_shared = near(fb, sa).min(near(fb, sb));
+            let fa_shared = near(fa, sa).min(near(fa, sb));
+            if fb_shared <= fa_shared {
+                fa
+            } else {
+                fb
+            }
+        }
+        _ => fa,
+    };
     c.move_to(pm(start));
     let mut cur = start;
     for seg in lp {

@@ -47,7 +47,7 @@ export type DrawingMeta = {
   customer?: string;
   /** The owner's address lines under its name in the title block. */
   address?: string[];
-  /** Density in kg/m³ by material name, for the weight in the title block. */
+  /** Density in kg/m³ by material name, for the weight in the title block; a built-in table covers the usual steels, stainless steels, aluminium, copper, brass, zinc and titanium. */
   densities?: Record<string, number>;
   /** The dossier's title: the configuration or the order. */
   title?: string;
@@ -175,6 +175,8 @@ export type DrawingSheet = {
   sections?: DrawingSection[];
   /** Flat sheets with bends: the folded part's L × W × H along the base flange's axes. */
   extents?: [number, number, number];
+  /** Flat sheets: the isometric pictorial of the folded part, when it found room. */
+  isometric?: { scale: string; scaleFactor: number; origin: [number, number]; bbox: [number, number, number, number] };
   /** `flat`: the flat pattern; `folded`: orthographic views of the folded part. */
   kind: "flat" | "folded";
   /** Folded sheets: the part's L × W × H. */

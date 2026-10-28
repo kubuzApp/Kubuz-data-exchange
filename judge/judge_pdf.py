@@ -25,12 +25,13 @@ its own reader, and never trusts the report for a fact it can check:
   the DXF's distances between the bend zones along the cut, its flange
   lengths are those pieces plus the tangent lengths to the virtual
   corners, its width and height are those of the folded band the judge
-  walks itself, and every bend that is not 90° has its angle on it;
+  walks itself, and every bend that is not 90° has the angle between its
+  flanges on it;
 * the folded extents in the title block are the box around the folded
   part's own vertices, when the folded view `<views>/<name>.view.json`
   (the name without `_flat`) exists;
 * no two texts overlap, and no line runs through a text;
-* the file stays small: 25 KB plus 4 KB a page.
+* the file stays small: 25 KB plus 6 KB a page.
 
 A folded sheet (kind "folded" in the report) is judged against the view
 JSON the dossier was drawn from, `<views>/<name>.view.json`, instead:
@@ -66,7 +67,7 @@ PT = 25.4 / 72.0
 SHEETS = {"A4": (210.0, 297.0), "A3": (420.0, 297.0)}
 SAME = 0.06
 SIZE_BASE = 25_000
-SIZE_PER_PAGE = 4_000
+SIZE_PER_PAGE = 6_000
 
 
 def mm_text(v):
@@ -227,55 +228,87 @@ def page_texts(page):
                 fonts[name] = pymupdf.Font(fontbuffer=page.parent.extract_font(xref)[3])
             except (RuntimeError, ValueError):
                 pass
-    for block in page.get_text("dict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)["blocks"]:
+    # Two values squeezed side by side on a chain come back as one span:
+    # a span is split where a glyph starts past the previous glyph's
+    # advance by more than 0,15 of the size (no spaces are invented).
+    for block in page.get_text("rawdict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE | pymupdf.TEXT_INHIBIT_SPACES)["blocks"]:
         for line in block.get("lines", []):
             dx, dy = line["dir"]
             rotated = abs(dy) > 0.5
             for span in line["spans"]:
-                t = span["text"].strip()
-                if not t:
-                    continue
                 size = span["size"]
-                want_desc = DESC * size if any(ch in DESCENDERS for ch in t) else 0.0
-                x0, y0, x1, y1 = span["bbox"]
-                ox, oy = span["origin"]
-                up = (dy, -dx)
                 font = fonts.get(span["font"].split("+")[-1])
-                if font is not None:
-                    lead = font.text_length(span["text"][: len(span["text"]) - len(span["text"].lstrip())], fontsize=size)
-                    a0 = lead
-                    a1 = lead + font.text_length(t, fontsize=size)
-                else:
-                    # Along the baseline: the bounding box's corners
-                    # projected on it (exact for horizontal and vertical
-                    # text).
-                    along = [(cx - ox) * dx + (cy - oy) * dy for cx in (x0, x1) for cy in (y0, y1)]
-                    a0, a1 = min(along), max(along)
-                p0, p1 = -want_desc, CAP * size
-                cx = ox + dx * (a0 + a1) / 2 + up[0] * (p0 + p1) / 2
-                cy = oy + dy * (a0 + a1) / 2 + up[1] * (p0 + p1) / 2
-                obox = (
-                    (cx * PT, (h - cy) * PT),
-                    (dx, -dy),
-                    (up[0], -up[1]),
-                    (a1 - a0) / 2 * PT,
-                    (p1 - p0) / 2 * PT,
-                )
-                corners = []
-                for sa in (-1, 1):
-                    for sp in (-1, 1):
-                        corners.append((
-                            obox[0][0] + obox[1][0] * sa * obox[3] + obox[2][0] * sp * obox[4],
-                            obox[0][1] + obox[1][1] * sa * obox[3] + obox[2][1] * sp * obox[4],
-                        ))
-                box = (
-                    min(c[0] for c in corners),
-                    min(c[1] for c in corners),
-                    max(c[0] for c in corners),
-                    max(c[1] for c in corners),
-                )
-                out.append((t, box, rotated, obox))
+
+                def advance(ch):
+                    if font is not None:
+                        return font.text_length(ch["c"], fontsize=size)
+                    bx = ch["bbox"]
+                    return (bx[3] - bx[1]) if rotated else (bx[2] - bx[0])
+
+                pieces, cur, prev_end = [], [], None
+                for ch in span["chars"]:
+                    along = ch["origin"][0] * dx + ch["origin"][1] * dy
+                    if cur and prev_end is not None and along - prev_end > 0.15 * size:
+                        pieces.append(cur)
+                        cur = []
+                    cur.append(ch)
+                    prev_end = along + advance(ch)
+                if cur:
+                    pieces.append(cur)
+                for piece in pieces:
+                    while piece and piece[0]["c"].isspace():
+                        piece.pop(0)
+                    while piece and piece[-1]["c"].isspace():
+                        piece.pop()
+                    if not piece:
+                        continue
+                    t = "".join(ch["c"] for ch in piece)
+                    want_desc = DESC * size if any(ch in DESCENDERS for ch in t) else 0.0
+                    ox, oy = piece[0]["origin"]
+                    up = (dy, -dx)
+                    if font is not None:
+                        a0 = 0.0
+                        a1 = font.text_length(t, fontsize=size)
+                    else:
+                        # Along the baseline: the glyph boxes' corners
+                        # projected on it (exact for horizontal and
+                        # vertical text).
+                        along = []
+                        for ch in piece:
+                            x0, y0, x1, y1 = ch["bbox"]
+                            along += [(cx - ox) * dx + (cy - oy) * dy for cx in (x0, x1) for cy in (y0, y1)]
+                        a0, a1 = min(along), max(along)
+                    p0, p1 = -want_desc, CAP * size
+                    out.append(text_entry(t, ox, oy, dx, dy, up, a0, a1, p0, p1, rotated, h))
     return out
+
+
+def text_entry(t, ox, oy, dx, dy, up, a0, a1, p0, p1, rotated, h):
+    """One text's record: text, box (mm from the lower left), rotated?,
+    oriented box (centre, along, up, half-length, half-height)."""
+    cx = ox + dx * (a0 + a1) / 2 + up[0] * (p0 + p1) / 2
+    cy = oy + dy * (a0 + a1) / 2 + up[1] * (p0 + p1) / 2
+    obox = (
+        (cx * PT, (h - cy) * PT),
+        (dx, -dy),
+        (up[0], -up[1]),
+        (a1 - a0) / 2 * PT,
+        (p1 - p0) / 2 * PT,
+    )
+    corners = []
+    for sa in (-1, 1):
+        for sp in (-1, 1):
+            corners.append((
+                obox[0][0] + obox[1][0] * sa * obox[3] + obox[2][0] * sp * obox[4],
+                obox[0][1] + obox[1][1] * sa * obox[3] + obox[2][1] * sp * obox[4],
+            ))
+    box = (
+        min(c[0] for c in corners),
+        min(c[1] for c in corners),
+        max(c[0] for c in corners),
+        max(c[1] for c in corners),
+    )
+    return (t, box, rotated, obox)
 
 
 def seg_hits_obox(seg, obox, by):
@@ -674,13 +707,16 @@ def flat_problems(sheet, d, words, folded_solid, scale=1.0):
             for dim in (x for x in dims if x["kind"] == kind):
                 if abs(dim["value"] - want) > SAME or dim["text"] != mm_text(want):
                     problems.append(f"{label}: {kind} {dim['text']} is not {mm_text(want)}")
+        # The angle written between the flanges is the one the operator
+        # measures: 180° less the bend's deviation from flat.
         for nr in nrs:
             ang = bends[nr]["angleDeg"]
+            between = 180.0 - ang
             dim = next((x for x in dims if x["kind"] == "angle" and x["sources"] == [f"bend:{nr}"]), None)
             if abs(ang - 90.0) > 0.05 and dim is None:
                 problems.append(f"{label}: bend {nr} is {mm_text(ang)}°, not drawn")
-            if dim is not None and (abs(dim["value"] - ang) > 0.05 or dim["text"] != f"{mm_text(ang)}°"):
-                problems.append(f"{label}: angle of bend {nr} is {dim['text']}, not {mm_text(ang)}°")
+            if dim is not None and (abs(dim["value"] - between) > 0.05 or dim["text"] != f"{mm_text(between)}°"):
+                problems.append(f"{label}: angle of bend {nr} is {dim['text']}, not {mm_text(between)}°")
         for dim in dims:
             if dim["text"] not in words:
                 problems.append(f"{label}: {dim['text']!r} not printed")

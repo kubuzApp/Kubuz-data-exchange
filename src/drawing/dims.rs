@@ -40,7 +40,7 @@ pub const ARROW_H: f64 = 0.75;
 /// Radius of the dot at an internal point of a chain.
 const DOT_R: f64 = 0.5;
 /// Text sits this far above its dimension line.
-const TEXT_UP: f64 = 1.0;
+const TEXT_UP: f64 = 1.5;
 /// A raised value sits this much higher than the one below.
 const RAISE: f64 = H + 1.0;
 const CALLOUT_PITCH: f64 = 7.0;
@@ -470,10 +470,7 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
     // line no value may sit on.
     let mut lines: Vec<[P2; 2]> = Vec::new();
     for lp in &f.loops {
-        let mut pts: Vec<P2> = Vec::new();
-        for seg in lp {
-            sample(seg, s, &mut pts);
-        }
+        let pts = super::features::loop_points(lp, s);
         for w in pts.windows(2) {
             lines.push([w[0], w[1]]);
         }
@@ -488,11 +485,15 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         ]);
     }
     let part_lines = lines.len();
+    // The lines a value may not sit on: the part, dimension lines and
+    // leaders. Extension lines are interrupted where a value crosses them.
+    let mut hard: Vec<[P2; 2]> = lines.clone();
     let place_rows = |side: f64,
                       which: usize,
                       chains: &mut Vec<Chain>,
                       boxes: &mut Vec<[f64; 4]>,
-                      lines: &mut Vec<[P2; 2]>| {
+                      lines: &mut Vec<[P2; 2]>,
+                      hard: &mut Vec<[P2; 2]>| {
         for (n, e, lo, hi, below, above) in &per_axis {
             let rows = if which == 0 { below } else { above };
             let mut line = extreme(&outline, *e, *e, side, side > 0.0).0 * side + D;
@@ -501,15 +502,17 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
                 let (a, b) = end_stations(&outline, *n, *e, side, s, *lo, *hi);
                 st.insert(0, a);
                 st.push(b);
-                let ch = place_chain(kind, *n, *e, side, line, st, s, boxes, lines);
+                let ch = place_chain(kind, *n, *e, side, line, st, s, boxes, hard);
                 line += SPACING + chain_rise(&ch);
-                lines.extend(chain_lines(&ch, s));
+                let own = chain_lines(&ch, s);
+                hard.push(own[0]);
+                lines.extend(own);
                 chains.push(ch);
             }
         }
     };
-    place_rows(1.0, 1, &mut chains, &mut boxes, &mut lines);
-    place_rows(-1.0, 0, &mut chains, &mut boxes, &mut lines);
+    place_rows(1.0, 1, &mut chains, &mut boxes, &mut lines, &mut hard);
+    place_rows(-1.0, 0, &mut chains, &mut boxes, &mut lines, &mut hard);
     // Oblique bends: each gets the press-brake stop of its flange, a
     // dimension across the flange from the bend line to the parallel
     // edge of the blank, its value outside the blank past that edge,
@@ -552,14 +555,14 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
             ];
             let line = dot(pb, e) * s;
             let mut trial = boxes.clone();
-            let ch = place_chain("bend", n, e, 1.0, line, st, s, &mut trial, &lines);
+            let ch = place_chain("bend", n, e, 1.0, line, st, s, &mut trial, &hard);
             let own = chain_lines(&ch, s);
             let bad = ch
                 .texts
                 .iter()
                 .filter(|t| {
                     boxes.iter().any(|b| overlap(*b, t.bx))
-                        || lines
+                        || hard
                             .iter()
                             .any(|l| crosses_text(*l, t.at, reading(n), font::width(&t.text, H)))
                 })
@@ -582,17 +585,24 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         }
         let (_, ch, trial) = best.unwrap();
         boxes = trial;
-        lines.extend(chain_lines(&ch, s));
+        let own = chain_lines(&ch, s);
+        hard.push(own[0]);
+        lines.extend(own);
         chains.push(ch);
     }
 
     // Every line is known now: place the values again so that none sits
-    // on the extension line of a row placed after its own.
+    // on the dimension line of a row placed after its own.
     let mut all_lines: Vec<[P2; 2]> = lines[..part_lines].to_vec();
-    all_lines.extend(chains.iter().flat_map(|ch| chain_lines(ch, s)));
+    hard.truncate(part_lines);
+    for ch in &chains {
+        let own = chain_lines(ch, s);
+        hard.push(own[0]);
+        all_lines.extend(own);
+    }
     boxes.clear();
     for ch in &mut chains {
-        place_texts(ch, s, &mut boxes, &all_lines);
+        place_texts(ch, s, &mut boxes, &hard);
     }
     lines = all_lines;
 
@@ -966,6 +976,37 @@ fn place_chain(
 /// above the neighbouring gap with a leader to its own, or away from the
 /// blank under the line; never on a line in `lines` or a box in `boxes`
 /// when it can be helped.
+/// Pool-adjacent-violators: the non-decreasing sequence nearest to `y`
+/// (weighted least squares).
+fn isotonic(y: &[f64], w: &[f64]) -> Vec<f64> {
+    let mut blocks: Vec<(f64, f64, usize)> = Vec::new();
+    for (yi, wi) in y.iter().zip(w) {
+        blocks.push((yi * wi, *wi, 1));
+        while blocks.len() >= 2 {
+            let n = blocks.len();
+            let (a, b) = (blocks[n - 2], blocks[n - 1]);
+            if a.0 / a.1 <= b.0 / b.1 + 1e-12 {
+                break;
+            }
+            blocks[n - 2] = (a.0 + b.0, a.1 + b.1, a.2 + b.2);
+            blocks.pop();
+        }
+    }
+    let mut out = Vec::with_capacity(y.len());
+    for b in blocks {
+        for _ in 0..b.2 {
+            out.push(b.0 / b.1);
+        }
+    }
+    out
+}
+
+/// Where a chain's values go. Every value wants the middle of its gap,
+/// above the line; values that do not fit are squeezed in along the line
+/// in their order, pushing their neighbours aside (and the first and last
+/// out past the ends), never over a line or another text. A value that
+/// still finds no room there goes above a neighbouring gap with a leader,
+/// or away from the blank under the line.
 fn place_texts(ch: &mut Chain, s: f64, boxes: &mut Vec<[f64; 4]>, lines: &[[P2; 2]]) {
     let (n, e, side, line) = (ch.n, ch.e, ch.side, ch.line);
     let stations = &ch.stations;
@@ -978,11 +1019,10 @@ fn place_texts(ch: &mut Chain, s: f64, boxes: &mut Vec<[f64; 4]>, lines: &[[P2; 
     let base = add([0.0, 0.0], e, side * line);
     let on_line = |t: f64| add(base, n, t * s);
     let m = stations.len();
-    let mut texts = Vec::new();
     let mut span = [stations[0].t * s, stations[m - 1].t * s];
     let mut reach: f64 = 0.0;
-    // Clear of every box (by hull) and of every line (by the text's own
-    // rectangle, so a slanted value is not blamed for its hull).
+    // Clear of every box (by hull) and of every hard line (by the text's
+    // own rectangle, so a slanted value is not blamed for its hull).
     let clear = |at: P2, bx: [f64; 4], tw: f64, boxes: &[[f64; 4]]| {
         !boxes.iter().any(|b| overlap(*b, bx))
             && !lines.iter().any(|l| crosses_text(*l, at, ur, tw))
@@ -997,121 +1037,227 @@ fn place_texts(ch: &mut Chain, s: f64, boxes: &mut Vec<[f64; 4]>, lines: &[[P2; 
         }
         v
     };
-    for i in 0..m - 1 {
-        let (t0, t1) = (stations[i].t, stations[i + 1].t);
-        let value = t1 - t0;
-        let txt = text::mm(value);
-        let tw = font::width(&txt, H);
-        let len = (t1 - t0) * s;
-        let first = i == 0;
-        let last = i + 2 == m;
-        let room = len
-            - if m == 2 {
-                2.0 * ARROW_L + 1.0
-            } else if first || last {
-                ARROW_L + 1.0
-            } else {
-                1.6
-            };
-        let mid = on_line((t0 + t1) / 2.0);
-        let mut choice: Option<(P2, [f64; 4], Option<[P2; 2]>)> = None;
-        if tw <= room {
-            for sl in slides(((room - tw) / 2.0).max(0.0)) {
-                let at = add(add(mid, ur, sl - tw / 2.0), up, TEXT_UP);
-                let bx = text_box(at, ur, tw, H);
-                if clear(at, bx, tw, boxes) {
-                    choice = Some((at, bx, None));
-                    break;
-                }
-            }
-        }
-        // Beyond the end, on the dimension line extended, for the first
-        // and last values and for a lone value between two arrows (past
-        // the blank's edge first, so that it lands outside the blank).
-        let edge_last = m == 2
-            && stations[1].sources.iter().any(|x| x == "extent")
-            && !stations[0].sources.iter().any(|x| x == "extent");
-        let ends: Vec<bool> = if m == 2 {
-            if edge_last {
-                vec![false, true]
-            } else {
-                vec![true, false]
+    // Local coordinates: u along the reading direction, v up from the
+    // dimension line.
+    let local = |p: P2| {
+        [
+            dot([p[0] - base[0], p[1] - base[1]], ur),
+            dot([p[0] - base[0], p[1] - base[1]], up),
+        ]
+    };
+
+    // The values, in reading order.
+    let count = m - 1;
+    let mut order: Vec<usize> = (0..count).collect();
+    if dot(n, ur) < 0.0 {
+        order.reverse();
+    }
+    let txts: Vec<String> = (0..count)
+        .map(|i| text::mm(stations[i + 1].t - stations[i].t))
+        .collect();
+    let tws: Vec<f64> = txts.iter().map(|t| font::width(t, H)).collect();
+    let mids: Vec<P2> = (0..count)
+        .map(|i| on_line((stations[i].t + stations[i + 1].t) / 2.0))
+        .collect();
+
+    // What the text band (above the line) may not cover: lines through
+    // it (extension lines excepted: they are interrupted at a value) and
+    // boxes on it, as intervals along u.
+    // (Descenders reach below the baseline.)
+    let band = [TEXT_UP - 0.8, TEXT_UP + H + 0.3];
+    let mut forbidden: Vec<[f64; 2]> = Vec::new();
+    for l in lines {
+        let (a, b) = (local(l[0]), local(l[1]));
+        // Clip the segment to the band's v range.
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        let dv = b[1] - a[1];
+        if dv.abs() < 1e-12 {
+            if a[1] < band[0] || a[1] > band[1] {
+                continue;
             }
         } else {
-            vec![first, last]
-        };
-        for at_first in ends {
-            if choice.is_some() || tw <= room {
-                break;
-            }
-            if at_first && (first || m == 2) {
-                let end = on_line(t0);
-                let out_dir = if dot(n, ur) > 0.0 { -1.0 } else { 1.0 };
-                let at = add(
-                    add(end, ur, if out_dir < 0.0 { -tw - 1.5 } else { 1.5 }),
-                    up,
-                    TEXT_UP,
-                );
-                let bx = text_box(at, ur, tw, H);
-                if clear(at, bx, tw, boxes) {
-                    span[0] = span[0].min(t0 * s - tw - 2.5);
-                    choice = Some((at, bx, None));
-                }
-            } else if !at_first && (last || m == 2) {
-                let end = on_line(t1);
-                let out_dir = if dot(n, ur) > 0.0 { 1.0 } else { -1.0 };
-                let at = add(
-                    add(end, ur, if out_dir > 0.0 { 1.5 } else { -tw - 1.5 }),
-                    up,
-                    TEXT_UP,
-                );
-                let bx = text_box(at, ur, tw, H);
-                if clear(at, bx, tw, boxes) {
-                    span[1] = span[1].max(t1 * s + tw + 2.5);
-                    choice = Some((at, bx, None));
-                }
+            let ta = (band[0] - a[1]) / dv;
+            let tb = (band[1] - a[1]) / dv;
+            t0 = t0.max(ta.min(tb));
+            t1 = t1.min(ta.max(tb));
+            if t0 > t1 {
+                continue;
             }
         }
-        if choice.is_none() {
-            // Above a neighbouring gap, the wider first, with a leader.
-            let mut neighbours: Vec<usize> = Vec::new();
-            if i > 0 {
-                neighbours.push(i - 1);
+        let u0 = a[0] + (b[0] - a[0]) * t0;
+        let u1 = a[0] + (b[0] - a[0]) * t1;
+        forbidden.push([u0.min(u1) - 0.4, u0.max(u1) + 0.4]);
+    }
+    for b in boxes.iter() {
+        let cs = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].map(local);
+        let (mut u0, mut u1, mut v0, mut v1) = (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for c in cs {
+            u0 = u0.min(c[0]);
+            u1 = u1.max(c[0]);
+            v0 = v0.min(c[1]);
+            v1 = v1.max(c[1]);
+        }
+        if v1 >= band[0] && v0 <= band[1] {
+            forbidden.push([u0 - 0.3, u1 + 0.3]);
+        }
+    }
+
+    // Squeeze: preferred centres in reading order, minimum separations,
+    // isotonic regression on the slack; a value over a forbidden
+    // interval is pinned beside it and the rest solved again.
+    let pref: Vec<f64> = order.iter().map(|&i| local(mids[i])[0]).collect();
+    let widths: Vec<f64> = order.iter().map(|&i| tws[i] + 0.8).collect();
+    let mut target = pref.clone();
+    let mut weight = vec![1.0; count];
+    let mut tried: Vec<u8> = vec![0; count];
+    let mut centres = vec![0.0; count];
+    for _ in 0..3 * count + 3 {
+        let mut d = vec![0.0; count];
+        for k in 1..count {
+            d[k] = d[k - 1] + (widths[k - 1] + widths[k]) / 2.0;
+        }
+        let y: Vec<f64> = (0..count).map(|k| target[k] - d[k]).collect();
+        let z = isotonic(&y, &weight);
+        for k in 0..count {
+            centres[k] = z[k] + d[k];
+        }
+        let mut moved = false;
+        for k in 0..count {
+            let half = widths[k] / 2.0;
+            let hit = forbidden
+                .iter()
+                .filter(|f| f[0] < centres[k] + half && centres[k] - half < f[1])
+                .fold(None, |acc: Option<[f64; 2]>, f| {
+                    Some(acc.map_or(*f, |a| [a[0].min(f[0]), a[1].max(f[1])]))
+                });
+            let Some(f) = hit else {
+                continue;
+            };
+            if tried[k] >= 2 {
+                continue;
             }
-            if i + 2 < m {
-                neighbours.push(i + 1);
-            }
-            neighbours.sort_by(|a, b| {
-                let la = stations[a + 1].t - stations[*a].t;
-                let lb = stations[b + 1].t - stations[*b].t;
-                lb.total_cmp(&la)
-            });
-            'nb: for j in neighbours {
-                let glen = (stations[j + 1].t - stations[j].t) * s;
-                if glen < tw + 2.0 {
-                    continue;
-                }
-                let gm = on_line((stations[j].t + stations[j + 1].t) / 2.0);
-                let towards = if dot(gm, ur) > dot(mid, ur) {
-                    -1.0
+            let left = f[0] - half - 0.1;
+            let right = f[1] + half + 0.1;
+            let nearer_left = (centres[k] - left).abs() <= (right - centres[k]).abs();
+            let pick = match (tried[k], nearer_left) {
+                (0, true) | (1, false) => left,
+                _ => right,
+            };
+            tried[k] += 1;
+            target[k] = pick;
+            weight[k] = 50.0;
+            moved = true;
+            break;
+        }
+        if !moved {
+            break;
+        }
+    }
+
+    let mut texts: Vec<Option<ChainText>> = vec![None; count];
+    let mut unresolved = Vec::new();
+    for (k, &i) in order.iter().enumerate() {
+        let tw = tws[i];
+        let half = widths[k] / 2.0;
+        let blocked = forbidden
+            .iter()
+            .any(|f| f[0] < centres[k] + half && centres[k] - half < f[1]);
+        let at = add(
+            add(mids[i], ur, centres[k] - pref[k] - tw / 2.0),
+            up,
+            TEXT_UP,
+        );
+        let bx = text_box(at, ur, tw, H);
+        if !blocked && clear(at, bx, tw, boxes) {
+            boxes.push(bx);
+            let (u0, u1) = (centres[k] - tw / 2.0 - 1.0, centres[k] + tw / 2.0 + 1.0);
+            // The dimension line runs under a value pushed past an end.
+            let ends = [
+                local(on_line(stations[0].t))[0],
+                local(on_line(stations[m - 1].t))[0],
+            ];
+            let (lo_u, hi_u) = (ends[0].min(ends[1]), ends[0].max(ends[1]));
+            let sign = if dot(n, ur) > 0.0 { 1.0 } else { -1.0 };
+            if u0 < lo_u {
+                let st = if sign > 0.0 {
+                    &mut span[0]
                 } else {
-                    1.0
+                    &mut span[1]
                 };
-                for sl in slides((glen - tw - 2.0) / 2.0) {
-                    let at = add(add(gm, ur, sl - tw / 2.0), up, TEXT_UP + RAISE);
-                    let bx = text_box(at, ur, tw, H);
-                    let tip = add(
-                        add(at, ur, if towards > 0.0 { tw + 0.6 } else { -0.6 }),
-                        up,
-                        H / 2.0,
-                    );
-                    let leader = [mid, tip];
-                    if clear(at, bx, tw, boxes)
-                        && !boxes.iter().any(|b| crosses_box(leader[0], leader[1], *b))
-                    {
-                        choice = Some((at, bx, Some(leader)));
-                        break 'nb;
-                    }
+                let v = stations[0].t.min(stations[m - 1].t) * s - (lo_u - u0);
+                if sign > 0.0 {
+                    *st = st.min(v);
+                } else {
+                    *st = st.max(stations[m - 1].t.max(stations[0].t) * s + (lo_u - u0));
+                }
+            }
+            if u1 > hi_u {
+                if sign > 0.0 {
+                    span[1] = span[1].max(stations[m - 1].t * s + (u1 - hi_u));
+                } else {
+                    span[0] = span[0].min(stations[0].t * s - (u1 - hi_u));
+                }
+            }
+            texts[i] = Some(ChainText {
+                value: stations[i + 1].t - stations[i].t,
+                text: txts[i].clone(),
+                at,
+                angle: ur[1].atan2(ur[0]).to_degrees(),
+                bx,
+                leader: None,
+            });
+        } else {
+            unresolved.push(i);
+        }
+    }
+
+    for i in unresolved {
+        let tw = tws[i];
+        let mid = mids[i];
+        let mut choice: Option<(P2, [f64; 4], Option<[P2; 2]>)> = None;
+        // Above a neighbouring gap, the wider first, with a leader.
+        let mut neighbours: Vec<usize> = Vec::new();
+        if i > 0 {
+            neighbours.push(i - 1);
+        }
+        if i + 2 < m {
+            neighbours.push(i + 1);
+        }
+        neighbours.sort_by(|a, b| {
+            let la = stations[a + 1].t - stations[*a].t;
+            let lb = stations[b + 1].t - stations[*b].t;
+            lb.total_cmp(&la)
+        });
+        'nb: for j in neighbours {
+            let glen = (stations[j + 1].t - stations[j].t) * s;
+            if glen < tw + 2.0 {
+                continue;
+            }
+            let gm = on_line((stations[j].t + stations[j + 1].t) / 2.0);
+            let towards = if dot(gm, ur) > dot(mid, ur) {
+                -1.0
+            } else {
+                1.0
+            };
+            for sl in slides((glen - tw - 2.0) / 2.0) {
+                let at = add(add(gm, ur, sl - tw / 2.0), up, TEXT_UP + RAISE);
+                let bx = text_box(at, ur, tw, H);
+                let tip = add(
+                    add(at, ur, if towards > 0.0 { tw + 0.6 } else { -0.6 }),
+                    up,
+                    H / 2.0,
+                );
+                let leader = [mid, tip];
+                if clear(at, bx, tw, boxes)
+                    && !boxes.iter().any(|b| crosses_box(leader[0], leader[1], *b))
+                {
+                    choice = Some((at, bx, Some(leader)));
+                    break 'nb;
                 }
             }
         }
@@ -1137,6 +1283,19 @@ fn place_texts(ch: &mut Chain, s: f64, boxes: &mut Vec<[f64; 4]>, lines: &[[P2; 
             let at = add(add(mid, ur, -tw / 2.0), up, TEXT_UP + RAISE);
             (at, text_box(at, ur, tw, H), None)
         });
+        boxes.push(bx);
+        texts[i] = Some(ChainText {
+            value: stations[i + 1].t - stations[i].t,
+            text: txts[i].clone(),
+            at,
+            angle: ur[1].atan2(ur[0]).to_degrees(),
+            bx,
+            leader,
+        });
+    }
+    let texts: Vec<ChainText> = texts.into_iter().map(|t| t.unwrap()).collect();
+    for t in &texts {
+        let bx = t.bx;
         for c in [
             [bx[0], bx[1]],
             [bx[2], bx[1]],
@@ -1145,15 +1304,6 @@ fn place_texts(ch: &mut Chain, s: f64, boxes: &mut Vec<[f64; 4]>, lines: &[[P2; 
         ] {
             reach = reach.max(dot(c, out) - dot(base, out));
         }
-        boxes.push(bx);
-        texts.push(ChainText {
-            value,
-            text: txt,
-            at,
-            angle: ur[1].atan2(ur[0]).to_degrees(),
-            bx,
-            leader,
-        });
     }
     // Arrows outside a short end segment need room beyond the end.
     if m >= 2 {
@@ -1167,6 +1317,46 @@ fn place_texts(ch: &mut Chain, s: f64, boxes: &mut Vec<[f64; 4]>, lines: &[[P2; 
     ch.texts = texts;
     ch.span = span;
     ch.reach = reach;
+}
+
+/// The parts of the segment `l` outside the boxes (grown by `margin`).
+fn cut_out(l: [P2; 2], boxes: &[[f64; 4]], margin: f64) -> Vec<[P2; 2]> {
+    let d = [l[1][0] - l[0][0], l[1][1] - l[0][1]];
+    let mut holes: Vec<[f64; 2]> = Vec::new();
+    for b in boxes {
+        let bx = [b[0] - margin, b[1] - margin, b[2] + margin, b[3] + margin];
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        let mut ok = true;
+        for k in 0..2 {
+            if d[k].abs() < 1e-12 {
+                if l[0][k] < bx[k] || l[0][k] > bx[k + 2] {
+                    ok = false;
+                }
+            } else {
+                let ta = (bx[k] - l[0][k]) / d[k];
+                let tb = (bx[k + 2] - l[0][k]) / d[k];
+                t0 = t0.max(ta.min(tb));
+                t1 = t1.min(ta.max(tb));
+            }
+        }
+        if ok && t0 < t1 {
+            holes.push([t0, t1]);
+        }
+    }
+    holes.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    let mut out = Vec::new();
+    let mut t = 0.0;
+    let at = |t: f64| [l[0][0] + d[0] * t, l[0][1] + d[1] * t];
+    for h in holes {
+        if h[0] > t + 1e-9 {
+            out.push([at(t), at(h[0])]);
+        }
+        t = t.max(h[1]);
+    }
+    if t < 1.0 - 1e-9 {
+        out.push([at(t), at(1.0)]);
+    }
+    out
 }
 
 /// The lines a chain draws (paper): its dimension line and the extension
@@ -1290,8 +1480,12 @@ pub fn draw(lo: &Layout, f: &Features, c: &mut Content, o: P2) {
 
     for ch in &lo.chains {
         let lines = chain_lines(ch, s);
-        for l in &lines {
-            c.line(pp(l[0]), pp(l[1]));
+        c.line(pp(lines[0][0]), pp(lines[0][1]));
+        // Extension lines are interrupted where a value sits on them.
+        for l in &lines[1..] {
+            for piece in cut_out(*l, &lo.boxes, 1.0) {
+                c.line(pp(piece[0]), pp(piece[1]));
+            }
         }
         let base = add([0.0, 0.0], ch.e, ch.side * ch.line);
         let m = ch.stations.len();

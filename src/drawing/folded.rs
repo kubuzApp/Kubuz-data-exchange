@@ -2288,6 +2288,7 @@ pub fn sheet(
         chains: vec![],
         sections: vec![],
         extents: None,
+        isometric: None,
         index: info.index,
         label,
         title: info.title.to_string(),

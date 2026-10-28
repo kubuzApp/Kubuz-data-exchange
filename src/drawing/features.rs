@@ -726,6 +726,53 @@ fn near(a: P2, b: P2) -> bool {
 }
 
 /// The two ends of a segment in loop order.
+/// The loop's points in its running order, about one per paper
+/// millimetre at scale `s` (paper coordinates). Arcs are stored
+/// counter-clockwise whichever way the loop runs, so each segment is
+/// entered at the end the walk stands on.
+pub fn loop_points(lp: &[Seg], s: f64) -> Vec<P2> {
+    let mut out: Vec<P2> = Vec::new();
+    let Some(first) = lp.first() else {
+        return out;
+    };
+    if let Seg::Circle { .. } = first {
+        super::dims::sample(first, s, &mut out);
+        return out;
+    }
+    let near = |p: P2, q: P2| (p[0] - q[0]).abs() + (p[1] - q[1]).abs();
+    let (fa, fb) = ends(first);
+    let mut cur = match lp.get(1) {
+        Some(second) if !matches!(second, Seg::Circle { .. }) => {
+            let (sa, sb) = ends(second);
+            if near(fb, sa).min(near(fb, sb)) <= near(fa, sa).min(near(fa, sb)) {
+                fa
+            } else {
+                fb
+            }
+        }
+        _ => fa,
+    };
+    for seg in lp {
+        let (a, b) = ends(seg);
+        let forward = near(a, cur) <= near(b, cur);
+        let mut pts = Vec::new();
+        super::dims::sample(seg, s, &mut pts);
+        if !forward {
+            pts.reverse();
+        }
+        // Drop the point the previous segment ended on.
+        if !out.is_empty() {
+            pts.remove(0);
+        }
+        out.extend(pts);
+        cur = if forward { b } else { a };
+    }
+    if out.len() > 1 && near(out[0], *out.last().unwrap()) < 1e-6 {
+        out.pop();
+    }
+    out
+}
+
 pub fn ends(s: &Seg) -> (P2, P2) {
     match *s {
         Seg::Line { a, b } => (a, b),

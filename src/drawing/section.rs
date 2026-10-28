@@ -582,6 +582,7 @@ pub struct SecAngle {
 #[derive(Clone, Debug)]
 pub struct SectionPlan {
     pub s: f64,
+    pub t: f64,
     pub geo: Geometry,
     /// Shown flat length per piece (flat pieces only), and which pieces
     /// are interrupted with their true length.
@@ -643,13 +644,13 @@ pub fn plan(p: &Profile, s: f64) -> SectionPlan {
     let mut dims_v: Vec<SecDim> = Vec::new();
     let mut values: Vec<f64> = Vec::new();
 
-    // Angles of deviation at bends that are not 90°: an arc at the
-    // virtual corner, no larger than the flanges beside it, the value
-    // where it meets no other text.
+    // The angle between the flanges at bends that are not 90°: an arc
+    // from one flange to the other at the virtual corner, no larger than
+    // the flanges beside it, the value where it meets no other text.
     let mut angles = Vec::new();
     for c in &geo.corners {
-        let value = c.turn.abs();
-        if (value - 90.0).abs() < 0.05 {
+        let value = 180.0 - c.turn.abs();
+        if (c.turn.abs() - 90.0).abs() < 0.05 {
             continue;
         }
         let nr = match p.pieces[c.piece] {
@@ -663,15 +664,17 @@ pub fn plan(p: &Profile, s: f64) -> SectionPlan {
             .map(|f| dims::dist(f.a, f.b) * s)
             .fold(f64::INFINITY, f64::min);
         let radius = (0.7 * shortest).clamp(5.0, ANGLE_R);
-        let start = ang(c.d_before);
-        let mid = (start + c.turn / 2.0).to_radians();
+        // From the flange before (back along it) to the flange after.
+        let start = ang(c.d_before) + 180.0;
+        let sweep = c.turn - 180.0 * c.turn.signum();
+        let mid = (start + sweep / 2.0).to_radians();
         let txt = text::deg(value);
         let tw = font::width(&txt, H);
         let mut chosen = None;
         // The arc itself, sampled closely, keeps the value off it.
         let arc: Vec<P2> = (0..=36)
             .map(|k| {
-                let a = (start + c.turn * k as f64 / 36.0).to_radians();
+                let a = (start + sweep * k as f64 / 36.0).to_radians();
                 [c.v[0] * s + radius * a.cos(), c.v[1] * s + radius * a.sin()]
             })
             .collect();
@@ -684,13 +687,15 @@ pub fn plan(p: &Profile, s: f64) -> SectionPlan {
             let hit = boxes.iter().any(|b| overlap(*b, bx))
                 || samples.iter().any(|q| inside(bx, *q))
                 || arc.iter().any(|q| inside(bx, *q))
-                || [c.d_before, c.d_after].iter().any(|d| {
-                    crosses_box(
-                        [c.v[0] * s, c.v[1] * s],
-                        [(c.v[0] + d[0] * far) * s, (c.v[1] + d[1] * far) * s],
-                        bx,
-                    )
-                });
+                || [[-c.d_before[0], -c.d_before[1]], c.d_after]
+                    .iter()
+                    .any(|d| {
+                        crosses_box(
+                            [c.v[0] * s, c.v[1] * s],
+                            [(c.v[0] + d[0] * far) * s, (c.v[1] + d[1] * far) * s],
+                            bx,
+                        )
+                    });
             if !hit || extra >= 20.0 {
                 chosen = Some((at, bx));
                 break;
@@ -715,7 +720,7 @@ pub fn plan(p: &Profile, s: f64) -> SectionPlan {
             v: c.v,
             radius,
             start,
-            sweep: c.turn,
+            sweep,
             value,
             text: txt,
             at,
@@ -875,6 +880,7 @@ pub fn plan(p: &Profile, s: f64) -> SectionPlan {
     }
     SectionPlan {
         s,
+        t: p.t,
         geo,
         shown,
         breaks,
@@ -989,14 +995,14 @@ pub fn draw(p: &SectionPlan, c: &mut Content, o: P2) {
     let s = p.s;
     let pm = |q: P2| [o[0] + q[0] * s, o[1] + q[1] * s];
     c.save();
-    // The blackened sheet: outer skin forward, inner skin back, as one
-    // filled path per unbroken run.
+    // Outer skin forward, inner skin back.
     let mut breaks_at: Vec<(usize, f64)> = Vec::new();
     for (i, _) in &p.breaks {
         breaks_at.push((*i, p.shown[*i]));
     }
-    c.width(0.25);
-    c.fill_gray(0.0);
+    // The sheet as it is: both skins and the ends, one closed path per
+    // unbroken run.
+    c.width(if p.t * s >= 1.0 { 0.35 } else { 0.25 });
     let mut path_outer: Vec<Vec<Elem>> = vec![vec![]];
     let mut path_inner: Vec<Vec<Elem>> = vec![vec![]];
     let mut ends: Vec<[P2; 2]> = vec![p.geo.ends[0]];
@@ -1043,7 +1049,7 @@ pub fn draw(p: &SectionPlan, c: &mut Content, o: P2) {
             trace(c, e, &pm, s, true);
         }
         c.close();
-        c.raw("B");
+        c.stroke();
     }
     // Break lines: a zigzag across the sheet and a little beyond.
     c.width(0.25);
@@ -1073,9 +1079,8 @@ pub fn draw(p: &SectionPlan, c: &mut Content, o: P2) {
     }
     for a in &p.angles {
         let v = pm(a.v);
-        // Extension of the flange before the bend, thin, past the arc.
+        // The arc runs from one flange to the other.
         let dir = [a.start.to_radians().cos(), a.start.to_radians().sin()];
-        c.line(v, add(v, dir, a.radius + 3.0));
         let p0 = add(v, dir, a.radius);
         c.move_to(p0);
         c.arc_sweep(v, a.radius, a.start, a.sweep);
@@ -1240,10 +1245,10 @@ pub fn title(p: &Profile, lang: text::Lang, s: f64, main: f64) -> String {
 // ---------------------------------------------------------------------
 // Folding the whole blank for the extents.
 
-type P3 = [f64; 3];
+pub type P3 = [f64; 3];
 
 #[derive(Clone, Copy, Debug)]
-struct Affine {
+pub struct Affine {
     m: [[f64; 3]; 3],
     t: P3,
 }
@@ -1253,7 +1258,7 @@ impl Affine {
         m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         t: [0.0; 3],
     };
-    fn apply(&self, p: P3) -> P3 {
+    pub fn apply(&self, p: P3) -> P3 {
         let mut q = self.t;
         for (qi, row) in q.iter_mut().zip(&self.m) {
             *qi += row.iter().zip(&p).map(|(m, x)| m * x).sum::<f64>();
@@ -1302,13 +1307,55 @@ fn area(poly: &[P2]) -> f64 {
     a.abs() / 2.0
 }
 
-/// Per bend of a folded walk: the parent's transform and the arc (centre,
-/// radii, turn) in the parent's (n, w) plane.
-type ZoneArc = (Affine, P2, P2, P2, f64, f64, f64, f64);
+/// One bend of the folded blank: the parent flange's transform and the
+/// walk's arc in the parent's (n, w) plane, so a point of the bend zone
+/// (along the bend line `e`, across it `n`) lands on the cylinder.
+#[derive(Clone, Copy, Debug)]
+pub struct BendFold {
+    pub parent: Affine,
+    pub e: P2,
+    pub n: P2,
+    /// Arc centre in the (n, w) plane, the outer skin's radius and the
+    /// inner skin's, the signed turn, and which way the skin lies from
+    /// the centre.
+    pub centre: P2,
+    pub r_skin: f64,
+    pub r_other: f64,
+    pub turn: f64,
+    pub sign: f64,
+    /// Where the bend zone starts along `n` and how wide it is.
+    pub n_start: f64,
+    pub allowance: f64,
+}
 
-/// The folded part's extents along the base flange's axes (L, W, H), from
-/// the blank's zones and bends: the largest flange stays flat, every other
-/// flange hangs off it through its bend, as [`walk`] folds a section.
+impl BendFold {
+    /// A point of the bend zone (blank coordinates) on the folded skin
+    /// (`skin` 0) or on the inner skin (`skin` 1), in the base frame.
+    pub fn apply(&self, p: P2, skin: usize) -> P3 {
+        let along = dot(p, self.e);
+        let f = ((dot(p, self.n) - self.n_start) / self.allowance).clamp(0.0, 1.0);
+        let mk = rot([0.0, -1.0], self.turn * f);
+        let r = if skin == 0 { self.r_skin } else { self.r_other };
+        let pt = add(self.centre, mk, self.sign * r);
+        self.parent.apply([
+            self.e[0] * along + self.n[0] * pt[0],
+            self.e[1] * along + self.n[1] * pt[0],
+            pt[1],
+        ])
+    }
+}
+
+/// The blank folded: a transform per flange zone (the largest flange is
+/// the base, every other flange hangs off it through its bend, as
+/// [`walk`] folds a section) and the cylinder per bend.
+pub struct Fold {
+    pub transform: Vec<Option<Affine>>,
+    pub bends: Vec<Option<BendFold>>,
+    /// Zone indices that are flanges (not bend zones).
+    pub flanges: Vec<usize>,
+}
+
+/// The folded part's extents along the base flange's axes (L, W, H).
 /// `None` when the zones do not chain (a bend without a flange on each
 /// side).
 pub fn folded_extents(blank: &Blank, t: f64) -> Option<[f64; 3]> {
@@ -1316,6 +1363,44 @@ pub fn folded_extents(blank: &Blank, t: f64) -> Option<[f64; 3]> {
         // A flat plate: its blank and the thickness.
         return (t > 0.0).then_some([blank.max[0], blank.max[1], t]);
     }
+    let fd = fold(blank, t)?;
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    let mut take = |p: P3| {
+        for i in 0..3 {
+            lo[i] = lo[i].min(p[i]);
+            hi[i] = hi[i].max(p[i]);
+        }
+    };
+    for (z, tr) in fd.transform.iter().enumerate() {
+        let Some(tr) = tr else {
+            continue;
+        };
+        for p in &blank.zones[z].points {
+            take(tr.apply([p[0], p[1], 0.0]));
+            take(tr.apply([p[0], p[1], -t]));
+        }
+    }
+    // Bend zones: both skins' arcs, at both ends of the line.
+    for (bi, b) in blank.bends.iter().enumerate() {
+        let Some(bf) = fd.bends[bi] else {
+            continue;
+        };
+        for k in 0..=8 {
+            let f = k as f64 / 8.0;
+            for skin in [0, 1] {
+                for end in [b.a, b.b] {
+                    let p = add(end, bf.n, bf.n_start + bf.allowance * f - dot(end, bf.n));
+                    take(bf.apply(p, skin));
+                }
+            }
+        }
+    }
+    Some([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]])
+}
+
+/// Fold the blank; `None` when a flange is unreachable from the base.
+pub fn fold(blank: &Blank, t: f64) -> Option<Fold> {
     if blank.zones.is_empty() {
         return None;
     }
@@ -1362,7 +1447,7 @@ pub fn folded_extents(blank: &Blank, t: f64) -> Option<[f64; 3]> {
     let mut queue = vec![base];
     // Per bend: the parent's transform and the walk's arc (centre, radii,
     // turn) in the parent's (n, w) plane, for sampling the zone.
-    let mut arcs: Vec<Option<ZoneArc>> = vec![None; blank.bends.len()];
+    let mut arcs: Vec<Option<BendFold>> = vec![None; blank.bends.len()];
     while let Some(z) = queue.pop() {
         let tz = transform[z].unwrap();
         for (bi, b) in blank.bends.iter().enumerate() {
@@ -1430,62 +1515,29 @@ pub fn folded_extents(blank: &Blank, t: f64) -> Option<[f64; 3]> {
             } else {
                 b.inside_radius
             };
-            arcs[bi] = Some((
-                tz,
+            arcs[bi] = Some(BendFold {
+                parent: tz,
                 e,
                 n,
                 centre,
                 r_skin,
                 r_other,
                 turn,
-                if up { 1.0 } else { -1.0 },
-            ));
+                sign: if up { 1.0 } else { -1.0 },
+                n_start: mid_n - half,
+                allowance: b.allowance,
+            });
             queue.push(child);
         }
     }
-    let mut lo = [f64::INFINITY; 3];
-    let mut hi = [f64::NEG_INFINITY; 3];
-    let mut take = |p: P3| {
-        for i in 0..3 {
-            lo[i] = lo[i].min(p[i]);
-            hi[i] = hi[i].max(p[i]);
-        }
-    };
-    for (z, tr) in transform.iter().enumerate() {
-        let Some(tr) = tr else {
-            if flanges.contains(&z) {
-                return None;
-            }
-            continue;
-        };
-        for p in &blank.zones[z].points {
-            take(tr.apply([p[0], p[1], 0.0]));
-            take(tr.apply([p[0], p[1], -t]));
-        }
+    if flanges.iter().any(|&z| transform[z].is_none()) {
+        return None;
     }
-    // Bend zones: both skins' arcs, at both ends of the line.
-    for (bi, b) in blank.bends.iter().enumerate() {
-        let Some((tz, e, n, centre, r_skin, r_other, turn, sign)) = arcs[bi] else {
-            continue;
-        };
-        let m = [0.0, -1.0];
-        for k in 0..=8 {
-            let phi = turn * k as f64 / 8.0;
-            let mk = rot(m, phi);
-            for r in [r_skin, r_other] {
-                let pt = add(centre, mk, sign * r);
-                for end in [b.a, b.b] {
-                    let along = dot(end, e);
-                    take(tz.apply([
-                        e[0] * along + n[0] * pt[0],
-                        e[1] * along + n[1] * pt[0],
-                        pt[1],
-                    ]));
-                }
-            }
-        }
-    }
-    Some([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]])
+    Some(Fold {
+        transform,
+        bends: arcs,
+        flanges,
+    })
 }
 
 fn centroid(poly: &[P2]) -> P2 {
@@ -1565,13 +1617,18 @@ mod tests {
         };
         let plan = plan(&p, 1.0);
         assert_eq!(plan.angles.len(), 1);
-        assert_eq!(plan.angles[0].text, "60°");
+        // A 60° bend leaves 120° between the flanges.
+        assert_eq!(plan.angles[0].text, "120°");
         assert!(plan.dims.iter().any(|d| d.kind == "flange"));
         assert!(plan.dims.iter().any(|d| d.kind == "height"));
         let mut c = Content::new();
         draw(&plan, &mut c, [50.0, 50.0]);
-        // "60°" as glyph ids.
-        assert!(c.as_str().contains("<001700110069> Tj"), "{}", c.as_str());
+        // "120°" as glyph ids.
+        assert!(
+            c.as_str().contains("<0012001300110069> Tj"),
+            "{}",
+            c.as_str()
+        );
         assert_eq!(title(&p, text::Lang::Nl, 1.0, 1.0), "DOORSNEDE A-A");
         assert_eq!(title(&p, text::Lang::Nl, 2.0, 1.0), "DOORSNEDE A-A (2:1)");
     }

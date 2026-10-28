@@ -131,9 +131,12 @@ largest ISO 5455 scale that fits; the title block is the same size on both.
 The sheet follows ISO 5457 (frame, centring and trimming marks, the grid
 reference `1 2 3 4 …` and `A B C …` around the frame), the title block the
 Kubuz template on ISO 7200 (designer, design date, approved, approved date,
-scale, size, projection symbol, material, thickness, weight, folded extents,
-the part's number and description, the customer, the owner's name and
-address, the ownership line), the lines ISO 128-2 (0,5 outline, 0,25 the
+scale, size, projection symbol, material, thickness, weight, the flat
+pattern's size, the part's number and description, the customer, the
+owner's name and address, the ownership line; the folded L × W × H is in
+the notes). The weight comes from the blank's area, the thickness and the
+material's density: `densities` in the meta, else a built-in table by the
+usual names (S235, DC01, DX51D, 304, 1.4301, AlMg3, CuZn, …), the lines ISO 128-2 (0,5 outline, 0,25 the
 rest), the lettering ISO 3098 (osifont, embedded as a subset) and the
 dimension style of the Inventor template (text 3 mm, arrows 3 × 0,75,
 extension lines 1 mm past the dimension line, decimal comma, one decimal).
@@ -146,16 +149,24 @@ and the exporter puts on it what the drafter does:
   then the outline's corners (the sharp corner a fillet replaced), then the
   overall size underneath; the holes get their own chain from the opposite
   edge, above or right. An oblique bend gets one short dimension across its
-  flange, from the bend line to the parallel edge. Every value stands on
-  its line when it fits, else beyond the end, above a neighbouring gap with
-  a leader, or outside the line: never on a line or another text;
-- **section views** of the folded part for every bend: a cut across the
-  flanges, drawn as the sheet's thickness band with the inside and outside
-  radii, the flanges dimensioned parallel to the flange (outside lengths,
-  interrupted when long), the bend angle between them when it is not 90°,
-  and the width and height. The section is marked on the flat pattern by
-  one arrow with its letter, no cutting line; the view is titled
-  `DOORSNEDE A-A` (with its scale when it differs);
+  flange, from the bend line to the parallel edge. Every value stands over
+  its gap when it fits; values that do not fit are squeezed in along the
+  line in their order, pushing their neighbours aside and the first and
+  last past the ends, and the extension lines are interrupted where a
+  value stands on them. A value that still finds no room goes above a
+  neighbouring gap with a leader, or outside the line: never on a line or
+  another text;
+- **section views** of the folded part for every bend, at the flat
+  pattern's scale: a cut across the flanges, drawn as the sheet really is
+  (both skins with the inside and outside radii), the flanges dimensioned
+  parallel to the flange (outside lengths, interrupted when long), the
+  angle between the flanges when the bend is not 90°, and the width and
+  height. The section is marked on the flat pattern by one arrow with its
+  letter, no cutting line; the view is titled `DOORSNEDE A-A`;
+- an **isometric pictorial** of the folded part when the sheet has room
+  for it (at the flat pattern's scale or up to two steps smaller, never on
+  a bigger sheet for its sake): the outer skin folded from the blank's
+  zones and bends, visible lines only;
 - **callouts** `⌀d` and `R` next to the feature when the paper around it
   is free, else in a column at the right; equal sizes are counted, `4× ⌀9`;
 - **numbered bend lines** with a table at the bottom of the sheet, aligned
@@ -197,9 +208,10 @@ small: about 20 KB for the font and 1 to 3 KB a sheet, fully vector.
 Besides the file the export describes every sheet (`sheets`): its kind
 (`flat` or `folded`), paper, scale, where the blank sits, material, every
 chain with its stations and the features that put them there, every section
-with its cut and the pieces it shows, the folded extents, and, for a folded
-sheet, each view's frame and origin in part coordinates, so an outside judge
-can rebuild the part from the drawing alone. Parts that cannot be drawn (a mesh, a
+with its cut and the pieces it shows, the folded extents, where the
+isometric sits, and, for a folded sheet, each view's frame and origin in
+part coordinates, so an outside judge can rebuild the part from the drawing
+alone. Parts that cannot be drawn (a mesh, a
 mirrored folded part) are listed under `skipped`.
 
 From the command line:
@@ -318,7 +330,7 @@ its numbered tag and its row in the table, every section's flange lengths
 and angles match the DXF cut (outside length = flat length plus the bend
 allowance of the thickness band), the folded extents match the folded
 fixture, no two texts overlap (measured with the embedded font's advances),
-no line runs through a text, the file stays under 25 KB plus 4 KB a page,
+no line runs through a text, the file stays under 25 KB plus 6 KB a page,
 and veraPDF passes it as PDF/A-2b. A folded sheet
 is judged against the view it was drawn from (`--views`): every ordinate
 is, in its view's frame, a vertex, a hole centre, a circle's extreme, a

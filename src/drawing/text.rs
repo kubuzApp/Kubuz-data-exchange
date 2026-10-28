@@ -93,7 +93,8 @@ const LABELS: &[(&str, [&str; 3])] = &[
     ("format", ["Formaat", "Paper size", "Format"]),
     ("tolerances", ["Algemene toleranties", "General tolerances", "Tolérances générales"]),
     ("projection", ["Projectiemethode", "Projection method", "Méthode de projection"]),
-    ("blank", ["Afmeting L × B × H", "Size L × W × H", "Encombrement L × l × H"]),
+    ("blank", ["Afwikkeling L × B", "Flat pattern L × W", "Développé L × l"]),
+    ("folded_size", ["Geplooid L × B × H", "Folded L × W × H", "Plié L × l × H"]),
     ("flat", ["AFWIKKELING", "FLAT PATTERN", "DÉVELOPPÉ"]),
     (
         "flat_sub",

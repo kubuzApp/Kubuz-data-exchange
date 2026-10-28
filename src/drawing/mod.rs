@@ -23,6 +23,7 @@ pub mod dims;
 pub mod features;
 pub mod flat;
 pub mod folded;
+pub mod iso;
 pub mod logo;
 pub mod project;
 pub mod running;
