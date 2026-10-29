@@ -169,12 +169,20 @@ and the exporter puts on it what the drafter does:
   zones and bends, visible lines only;
 - **callouts** `⌀d` and `R` next to the feature when the paper around it
   is free, else in a column at the right; equal sizes are counted, `4× ⌀9`;
-- a **field** of six or more equal holes or cut-outs on an equally spaced
-  grid (a grating's mesh, a perforated panel) is dimensioned as one: the
-  chains locate its outer cells (the edges of cut-outs, the centres of
-  holes) and one callout gives the cell and the grid, `261× 29 × 29` over
-  `9 × 29, steek 33,33` (the pitch to a hundredth, so that it adds up over
-  the field); a slot is located by the centres of its round ends;
+- **hole patterns** as ISO 129-1 7.8 and ISO 15786 write them, every one
+  from its centres: a **field** of six or more equal holes or cut-outs on
+  an equally spaced grid (a grating's mesh, a perforated panel) is located
+  by the centres of its first and last cell, the chain writes the spaces
+  between them as one run `6× 40 (=240)` (the pitch to a hundredth when a
+  tenth would drift over the field, `28× 33,33 (=933,2)`), and one callout
+  counts the cells, `42× ⌀10` or `261× 29 × 29`; holes on a **pitch
+  circle** (three or more, equally spaced) are located by the circle's
+  centre, the circle is drawn long-dashed dotted with its diameter `⌀150`,
+  the holes are called out `8× ⌀18` with their spacing `8× 45°` under it,
+  and the first hole's angle from the horizontal is dimensioned when it is
+  not on it, `22,5°`; a **slot** is located by its centre and called out by
+  its width and the distance between its end centres, `12 × 28 h.o.h.`
+  (`c/c`, `entraxe`), equal slots counted, `2× 12 × 28 h.o.h.`;
 - **numbered bend lines** with a table at the bottom of the sheet, aligned
   with the notes: angle (deviation from flat), direction (`OP` towards the
   viewer, `NEER` away: the view is the outer skin), inside radius and bend
@@ -349,10 +357,13 @@ drew with its own DXF reader, and checks that every page is an ISO sheet,
 every font is embedded, every chain the export claims is printed with its
 values equal to the gaps between its stations, every station is a corner
 of the blank (or the theoretical corner past a relief), a hole centre or a
-bend line, every chain runs from edge to edge, every hole centre, cut-out,
-bend line and blank extent is dimensioned (a field of equal holes or
-cut-outs by its outer cells, with its cell and grid called out), every hole
-size has its callout, every bend
+bend line, every chain runs from edge to edge, every hole centre, slot centre,
+cut-out, bend line and blank extent is dimensioned, every hole pattern is
+rebuilt from the printed values alone (a field from its first cell and the
+run `n× p (=sum)` on each chain, a pitch circle from its centre, `⌀PCD`,
+`n× ⌀d`, `n× step°` and the first hole's angle) and every centre so
+rebuilt is a hole of the DXF, every hole and slot size has its callout,
+every bend
 its numbered tag and its row in the table, every section's flange lengths
 and angles match the DXF cut (outside length = flat length plus the bend
 allowance of the thickness band), the folded extents match the folded
