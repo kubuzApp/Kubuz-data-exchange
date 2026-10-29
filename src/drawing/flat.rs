@@ -916,6 +916,33 @@ pub fn sheet(
             sources: vec![],
             section: None,
         });
+        // A pitch circle's angular spacing under its hole callout.
+        if let Some(note) = &co.note {
+            dimensions.push(DimReport {
+                kind: "spacing".into(),
+                axis: None,
+                value: 360.0 / co.count as f64,
+                text: note.clone(),
+                count: Some(co.count),
+                sources: vec![],
+                section: None,
+            });
+        }
+    }
+    for pd in &p.layout.polars {
+        if let Some(a) = &pd.angle {
+            dimensions.push(DimReport {
+                kind: "angle".into(),
+                axis: None,
+                value: (a.ray[1][1] - a.ray[0][1])
+                    .atan2(a.ray[1][0] - a.ray[0][0])
+                    .to_degrees(),
+                text: a.text.clone(),
+                count: None,
+                sources: vec![],
+                section: None,
+            });
+        }
     }
     Ok(SheetReport {
         index: info.index,

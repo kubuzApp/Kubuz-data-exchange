@@ -16,9 +16,17 @@ its own reader, and never trusts the report for a fact it can check:
   station of it is a coordinate of the DXF (a cut, a bend line, a hole
   centre, or the corner two long cut lines make past a relief), and
   every value is the gap between two stations (no invented numbers);
-* every bend line, hole centre and blank extent is a station of a chain
-  in its direction;
-* every hole diameter has a callout counting the holes of that size;
+* every bend line, hole centre, slot centre and blank extent is a station
+  of a chain in its direction; a chain may write equal spaces as one run
+  `6× 40 (=240)` whose count times pitch is the gap;
+* every hole diameter and slot size has a callout counting the features
+  of that size (`⌀26`, `8× ⌀18`, `2× 12 × 28 h.o.h.`);
+* every hole pattern is rebuilt from the printed values alone and every
+  centre so rebuilt is a feature of the DXF: a field (six or more equal
+  features on a grid) from the centre of its first cell and the runs on
+  the chains, holes on a pitch circle (three or more, equally spaced)
+  from the circle's centre, `⌀PCD`, `n× ⌀d`, the spacing `n× step°` and
+  the first hole's angle from +x when it is not on the axis;
 * every bend line has a numbered tag, and its note when the report
   claims one;
 * every section cuts the blank where the report says: its flat pieces are
@@ -104,6 +112,32 @@ def fine_text(v):
     return f"{r:.2f}".replace(".", ",")
 
 
+def deg_text(v):
+    """An angle as the drawing writes it: a tenth, no trailing zero, °."""
+    return f"{mm_text(v)}°"
+
+
+def run_text(k, pitch, total):
+    """Equal spaces on a chain as ISO 129-1 writes them: `6× 40 (=240)`."""
+    return f"{k}× {fine_text(pitch)} (={mm_text(total)})"
+
+
+def parse_run(txt):
+    """(count, pitch, total) of a run text, else None."""
+    try:
+        k, rest = txt.split("× ", 1)
+        pitch, total = rest.split(" (=", 1)
+        if not total.endswith(")"):
+            return None
+        return int(k), float(pitch.replace(",", ".")), float(total[:-1].replace(",", "."))
+    except ValueError:
+        return None
+
+
+def parse_mm(txt):
+    return float(txt.replace(",", "."))
+
+
 # --- DXF --------------------------------------------------------------------
 
 
@@ -144,7 +178,46 @@ def read_dxf(path):
             out["arcs"].append(((float(e[10]), float(e[20])), float(e[40]), float(e[50]), float(e[51])))
         elif e["type"] == "CIRCLE" and layer == "CUT":
             out["circles"].append(((float(e[10]), float(e[20])), float(e[40])))
+    merge_arcs(out)
     return out
+
+
+def merge_arcs(d):
+    """Arcs about one centre with one radius that follow on from each
+    other are one arc (the kernel writes a round end as its quarters), and
+    a full turn of them is one round hole."""
+    rings = {}
+    for arc in d["arcs"]:
+        c, r = arc[0], arc[1]
+        rings.setdefault((round(c[0], 2), round(c[1], 2), round(r, 2)), []).append(arc)
+    kept = []
+    for arcs in rings.values():
+        c = (sum(a[0][0] for a in arcs) / len(arcs), sum(a[0][1] for a in arcs) / len(arcs))
+        r = sum(a[1] for a in arcs) / len(arcs)
+        sweep = sum((a1 - a0) % 360.0 or 360.0 for _, _, a0, a1 in arcs)
+        if len(arcs) > 1 and abs(sweep - 360.0) < 0.01:
+            d["circles"].append((c, r))
+            continue
+        # Chain the arcs: each one starts where the previous ends.
+        rest = sorted(arcs, key=lambda a: a[2] % 360.0)
+        while rest:
+            _, _, a0, a1 = rest.pop(0)
+            grown = True
+            while grown:
+                grown = False
+                for i, (_, _, b0, b1) in enumerate(rest):
+                    if abs((b0 - a1 + 180.0) % 360.0 - 180.0) < 0.01:
+                        a1 = b1
+                        rest.pop(i)
+                        grown = True
+                        break
+                    if abs((a0 - b1 + 180.0) % 360.0 - 180.0) < 0.01:
+                        a0 = b0
+                        rest.pop(i)
+                        grown = True
+                        break
+            kept.append((c, r, a0, a1))
+    d["arcs"] = kept
 
 
 def arc_point(c, r, deg):
@@ -208,12 +281,14 @@ def virtual_corners(d, bound):
     return out
 
 
-def cutouts(d):
+def cutouts(d, with_members=False):
     """The inner contours of the blank that are not circles, each as
-    (lo, hi, segment count, points: ends, arc centres and extremes): the CUT lines and arcs joined end to end, the
-    contour with the widest extent being the outline."""
+    (lo, hi, segment count, points: ends, arc centres and extremes[, the
+    entities]): the CUT lines and arcs joined end to end, the contour
+    with the widest extent being the outline."""
     segs = [(a, b) for a, b in d["lines"]]
     segs += [(arc_point(c, r, a0), arc_point(c, r, a1)) for c, r, a0, a1 in d["arcs"]]
+    ents = list(d["lines"]) + list(d["arcs"])
     parent = list(range(len(segs)))
 
     def find(i):
@@ -244,11 +319,56 @@ def cutouts(d):
                     pts.append(arc_point(c, r, q))
         lo = (min(p[0] for p in pts), min(p[1] for p in pts))
         hi = (max(p[0] for p in pts), max(p[1] for p in pts))
-        boxes.append((lo, hi, len(members), pts))
+        row = (lo, hi, len(members), pts)
+        if with_members:
+            row += ([ents[i] for i in members],)
+        boxes.append(row)
     if not boxes:
         return []
     outer = max(range(len(boxes)), key=lambda i: max(boxes[i][1][0] - boxes[i][0][0], boxes[i][1][1] - boxes[i][0][1]))
     return [b for i, b in enumerate(boxes) if i != outer]
+
+
+def slots(d):
+    """Every slot among the cut-outs: two parallel CUT lines closed by two
+    semicircles of one radius, as (centre, end centres, width, length
+    between the end centres, its points)."""
+    out = []
+    for lo, hi, n, pts, members in cutouts(d, with_members=True):
+        if n != 4:
+            continue
+        arcs = [m for m in members if len(m) == 4]
+        lines = [m for m in members if len(m) == 2]
+        if len(arcs) != 2 or len(lines) != 2:
+            continue
+        (c0, r0, a0, a1), (c1, r1, b0, b1) = arcs
+        if abs(r0 - r1) > 0.02 or any(abs((e - b) % 360.0 - 180.0) > 0.5 for b, e in ((a0, a1), (b0, b1))):
+            continue
+        if math.dist(c0, c1) < 0.02:
+            continue
+        a, b = sorted((c0, c1), key=lambda c: (round(c[1], 2), round(c[0], 2)))
+        out.append((((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), (a, b), 2 * r0, math.dist(a, b), pts))
+    return out
+
+
+def polar(centres):
+    """(centre, radius, start angle, step) when the centres sit equally
+    spaced on one circle, else None."""
+    n = len(centres)
+    if n < 3:
+        return None
+    c = (sum(p[0] for p in centres) / n, sum(p[1] for p in centres) / n)
+    r = math.dist(c, centres[0])
+    if r < 1.0 or any(abs(math.dist(c, p) - r) > 0.02 for p in centres):
+        return None
+    angles = sorted(math.degrees(math.atan2(p[1] - c[1], p[0] - c[0])) % 360.0 for p in centres)
+    step = 360.0 / n
+    start = angles[0]
+    if any(abs(a - (start + step * k) % 360.0) > 0.05 for k, a in enumerate(angles)):
+        return None
+    if start < 0.05 or 360.0 - start < 0.05:
+        start = 0.0
+    return c, r, start, step
 
 
 def grid(centres):
@@ -555,6 +675,12 @@ def projections(d, direction, bound):
         take(b)
     for q in virtual_corners(d, bound):
         pool.add(round(proj(q), 3))
+    # A cut-out's middle: a field of cut-outs is located by the centres
+    # of its first and last cells, a slot by its centre.
+    for lo, hi, _, _ in cutouts(d):
+        pool.add(round(proj(((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2)), 3))
+    for centre, _, _, _, _ in slots(d):
+        pool.add(round(proj(centre), 3))
     return pool, min(metal), max(metal)
 
 
@@ -644,6 +770,7 @@ def flat_problems(sheet, d, words, folded_solid, scale=1.0):
 
     # Chains: edge to edge, on the blank's coordinates, values printed.
     stations = {}  # direction -> list of t
+    runs = {}  # direction -> list of (t0, t1, count, pitch)
     for c in sheet.get("chains", []):
         u = tuple(c["direction"])
         key = (round(u[0], 6), round(u[1], 6))
@@ -671,7 +798,15 @@ def flat_problems(sheet, d, words, folded_solid, scale=1.0):
         for i, (v, txt) in enumerate(zip(c["values"], c["texts"])):
             if abs(v - (ts[i + 1] - ts[i])) > 1e-3:
                 problems.append(f"{label}: value {txt} is not the gap between its stations")
-            if mm_text(v) != txt:
+            run = parse_run(txt)
+            if run is not None:
+                # Equal spaces: `6× 40 (=240)`, the sum the gap and the
+                # count times the pitch the gap too (ISO 129-1 7.8.1).
+                k, pitch, total = run
+                if txt != run_text(k, pitch, v) or abs(k * pitch - v) > 0.005 * k + 1e-6:
+                    problems.append(f"{label}: run {txt!r} does not add up to {mm_text(v)}")
+                runs.setdefault(key, []).append((ts[i], ts[i + 1], k, pitch))
+            elif mm_text(v) != txt:
                 problems.append(f"{label}: text {txt!r} is not {mm_text(v)!r}")
             if txt not in words:
                 problems.append(f"{label}: {txt!r} not printed")
@@ -685,45 +820,120 @@ def flat_problems(sheet, d, words, folded_solid, scale=1.0):
         problems.append("no chain along x")
     if (0.0, 1.0) not in stations:
         problems.append("no chain along y")
-    # Holes and cut-outs: each located, or, six or more equal ones on an
-    # equally spaced grid, the field located by its outer cells (edges of
-    # cut-outs, centres of holes) and called out with its grid.
+    # Holes, slots and cut-outs, ISO 129-1 7.8 and ISO 15786: a lone
+    # feature is located by its centre (a cut-out by any point of it);
+    # equal holes on a pitch circle by the circle's centre, its diameter,
+    # the number and diameter of the holes, their angular spacing and the
+    # first hole's angle from +x when it is not on the axis; six or more
+    # equal features on a grid by the first and last cell's centres with
+    # the spaces as a run `n× p (=sum)` on the chains. The judge rebuilds
+    # every centre from the printed values and finds it in the DXF.
+    slot_rows = slots(d)
+    slot_pts = {id(row[4]) for row in slot_rows}
     groups = {}
     for c, r in d["circles"]:
-        groups.setdefault(("circle", round(2 * r, 1)), []).append(((c[0] - r, c[1] - r), (c[0] + r, c[1] + r), [c]))
+        groups.setdefault(("circle", round(2 * r, 1)), []).append((c, [c]))
+    for row in slot_rows:
+        centre, ends, w, L, pts = row
+        groups.setdefault(("slot", round(w, 1), round(L, 1)), []).append((centre, [centre]))
     for lo, hi, n, pts in cutouts(d):
+        if n == 4 and any(math.dist(((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2), row[0]) < 0.02 for row in slot_rows):
+            continue
         key = ("cutout", round(hi[0] - lo[0], 2), round(hi[1] - lo[1], 2), n)
-        groups.setdefault(key, []).append((lo, hi, pts))
+        groups.setdefault(key, []).append((((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2), pts))
+    dims = sheet.get("dimensions", [])
+    cc_words = ("h.o.h.", "c/c", "entraxe")
+
+    def callout_of(key, n):
+        kind = key[0]
+        if kind == "circle":
+            one = f"⌀{mm_text(key[1])}"
+        elif kind == "slot":
+            one = None
+        else:
+            one = f"{mm_text(key[1])} × {mm_text(key[2])}"
+        if kind == "slot":
+            wants = [f"{mm_text(key[1])} × {mm_text(key[2])} {cc}" for cc in cc_words]
+        else:
+            wants = [one]
+        if n > 1:
+            wants = [f"{n}× {w}" for w in wants]
+        return wants
+
+    def reconstruct(label, want, have, tol):
+        for p in have:
+            if not any(math.dist(p, q) <= tol for q in want):
+                problems.append(f"{label}: the printed values put no centre at ({mm_text(p[0])}, {mm_text(p[1])})")
+
+    lone = {}  # (kind, size) -> count of features called out one by one
     for key, members in groups.items():
-        hole = key[0] == "circle"
-        centres = [((m[0][0] + m[1][0]) / 2, (m[0][1] + m[1][1]) / 2) for m in members]
-        g = grid(centres) if len(members) >= 6 else None
-        if g is None:
-            for (lo, hi, pts), c in zip(members, centres):
+        centres = [m[0] for m in members]
+        n = len(members)
+        pattern = None
+        if key[0] == "circle" and n >= 3:
+            pattern = ("polar", polar(centres))
+        if pattern is None or pattern[1] is None:
+            pattern = ("grid", grid(centres)) if n >= 6 else None
+        if pattern is None or pattern[1] is None:
+            for c, pts in members:
                 xs = [p[0] for p in pts]
                 ys = [p[1] for p in pts]
                 if not any(located((1.0, 0.0), x) for x in xs) or not any(located((0.0, 1.0), y) for y in ys):
-                    what = "hole" if hole else "cut-out"
-                    problems.append(f"{what} at ({mm_text(c[0])}, {mm_text(c[1])}) not located")
+                    problems.append(f"{key[0]} at ({mm_text(c[0])}, {mm_text(c[1])}) not located")
+            lone[key] = lone.get(key, 0) + n
             continue
-        nx, ny, px, py = g
-        if hole:
-            ends = [(min(c[0] for c in centres), min(c[1] for c in centres)), (max(c[0] for c in centres), max(c[1] for c in centres))]
+        kind, found = pattern
+        label = f"{kind} of {n} {key[0]}s"
+        wants = callout_of(key, n)
+        if not any(w in words for w in wants):
+            problems.append(f"{label}: no callout {wants[0]!r}")
+        if kind == "polar":
+            c, r, start, step = found
+            if not located((1.0, 0.0), c[0]) or not located((0.0, 1.0), c[1]):
+                problems.append(f"{label}: centre ({mm_text(c[0])}, {mm_text(c[1])}) not located")
+            pcd = f"⌀{mm_text(2 * r)}"
+            spacing = f"{n}× {deg_text(step)}"
+            printed = {"pitch": pcd, "spacing": spacing}
+            if start > 0.0:
+                printed["angle"] = deg_text(start)
+            for what, txt in printed.items():
+                if txt not in words:
+                    problems.append(f"{label}: {what} {txt!r} not printed")
+                if not any(x["kind"] == what and x["text"] == txt for x in dims):
+                    problems.append(f"{label}: {what} {txt!r} not in the report")
+            if start == 0.0 and any(x["kind"] == "angle" for x in dims):
+                problems.append(f"{label}: an angle is drawn for a hole on the axis")
+            # Rebuild the holes from what is printed.
+            r2 = parse_mm(pcd[1:]) / 2.0
+            step2 = parse_mm(spacing.split("× ")[1].rstrip("°"))
+            start2 = parse_mm(printed["angle"].rstrip("°")) if "angle" in printed else 0.0
+            want = [arc_point(c, r2, start2 + step2 * k) for k in range(n)]
+            reconstruct(label, want, centres, SAME + 0.05 + r * math.radians(0.05))
         else:
-            ends = [(min(m[0][0] for m in members), min(m[0][1] for m in members)), (max(m[1][0] for m in members), max(m[1][1] for m in members))]
-        label = f"field of {len(members)} at ({mm_text(ends[0][0])}, {mm_text(ends[0][1])})"
-        for p in ends:
-            if not located((1.0, 0.0), p[0]) or not located((0.0, 1.0), p[1]):
-                problems.append(f"{label}: outer cell at ({mm_text(p[0])}, {mm_text(p[1])}) not located")
-        if not hole:
-            want = f"{len(members)}× {mm_text(key[1])} × {mm_text(key[2])}"
-            if want not in words:
-                problems.append(f"{label}: no callout {want!r}")
-        pitch = fine_text(px if nx > 1 else py)
-        if nx > 1 and ny > 1 and abs(px - py) > 0.02:
-            pitch = f"{fine_text(px)} × {fine_text(py)}"
-        if not any(w.startswith(f"{nx} × {ny}, ") and w.endswith(f" {pitch}") for w in words):
-            problems.append(f"{label}: grid {nx} × {ny}, pitch {pitch} not called out")
+            nx, ny, px, py = found
+            first = (min(p[0] for p in centres), min(p[1] for p in centres))
+            last = (max(p[0] for p in centres), max(p[1] for p in centres))
+            rebuilt = [first, last]
+            for axis, cnt, pitch, u in ((0, nx, px, (1.0, 0.0)), (1, ny, py, (0.0, 1.0))):
+                keyu = (round(u[0], 6), round(u[1], 6))
+                for p in (first, last):
+                    if not located(u, p[axis]):
+                        problems.append(f"{label}: cell at ({mm_text(p[0])}, {mm_text(p[1])}) not located along ({u[0]:g}, {u[1]:g})")
+                if cnt < 2:
+                    continue
+                run = next((x for x in runs.get(keyu, []) if abs(x[0] - first[axis]) <= SAME and abs(x[1] - last[axis]) <= SAME), None)
+                if run is None:
+                    problems.append(f"{label}: no run {run_text(cnt - 1, pitch, last[axis] - first[axis])!r} on the chain along ({u[0]:g}, {u[1]:g})")
+                    continue
+                if run[2] != cnt - 1:
+                    problems.append(f"{label}: run counts {run[2]} spaces, the field has {cnt - 1}")
+                rebuilt.append((cnt, run[3]))
+            if len(rebuilt) == 2 + (nx > 1) + (ny > 1):
+                steps = iter(rebuilt[2:])
+                cx, pxx = next(steps) if nx > 1 else (1, 0.0)
+                cy, pyy = next(steps) if ny > 1 else (1, 0.0)
+                want = [(first[0] + pxx * i, first[1] + pyy * j) for j in range(cy) for i in range(cx)]
+                reconstruct(label, want, centres, SAME + 0.005 * max(cx, cy))
     for nr, (a, b) in enumerate(d["bends"], 1):
         ln = math.dist(a, b)
         if ln < 1e-9:
@@ -741,14 +951,14 @@ def flat_problems(sheet, d, words, folded_solid, scale=1.0):
         if not hit:
             problems.append(f"bend line {nr} not dimensioned")
 
-    # Hole callouts.
-    by_dia = {}
-    for c, r in d["circles"]:
-        by_dia[round(2 * r, 1)] = by_dia.get(round(2 * r, 1), 0) + 1
-    for dia, n in by_dia.items():
-        want_text = f"⌀{mm_text(dia)}" if n == 1 else f"{n}× ⌀{mm_text(dia)}"
-        if want_text not in words:
-            problems.append(f"no callout {want_text!r}")
+    # Callouts of the features outside any pattern: one per size,
+    # counting them (`⌀26`, `2× 12 × 28 h.o.h.`).
+    for key, n in lone.items():
+        if key[0] == "cutout":
+            continue
+        wants = callout_of(key, n)
+        if not any(w in words for w in wants):
+            problems.append(f"no callout {wants[0]!r}")
 
     # Bend tags, notes and table.
     for nr in range(1, len(d["bends"]) + 1):

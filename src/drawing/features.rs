@@ -5,7 +5,7 @@
 //! becomes one circle again, so that a dimension lands on a feature, never
 //! on a seam of the model.
 
-use super::pattern::{patterns, Pattern};
+use super::pattern::{patterns, slot_of, Kind, Pattern, Slot};
 use crate::dxf::blank::{arc_point, Blank, Seg, P2};
 
 const TOL: f64 = 1e-4;
@@ -102,8 +102,8 @@ pub struct Features {
     /// Fields of equal cut-outs, dimensioned as one: their member loops
     /// add no corners or circles of their own.
     pub patterns: Vec<Pattern>,
-    /// The centres of the round ends of slots.
-    pub slot_ends: Vec<P2>,
+    /// Slots, located by their centres.
+    pub slots: Vec<Slot>,
     /// How many corners were left out as minor.
     pub minor: usize,
     pub xs: Vec<Ordinate>,
@@ -123,6 +123,12 @@ pub fn features(blank: &Blank) -> Features {
     for (li, lp) in f.loops.iter().enumerate() {
         if in_pattern.contains(&li) {
             continue;
+        }
+        if li != outer {
+            if let Some(slot) = slot_of(li, lp) {
+                f.slots.push(slot);
+                continue;
+            }
         }
         if let [Seg::Circle { c, r }] = lp.as_slice() {
             f.circles.push(Circle { c: *c, r: *r });
@@ -202,12 +208,9 @@ pub fn features(blank: &Blank) -> Features {
                                 minor,
                                 on_curve: false,
                             });
-                        } else if li != outer {
-                            // Parallel lines in a cut-out: a slot end. Its
-                            // centre fixes it, like a hole's.
-                            f.slot_ends.push(c);
                         } else {
-                            // A rounded tab on the outline.
+                            // Parallel lines: a rounded tab or a slot end
+                            // that is not a whole slot. Its centre fixes it.
                             f.corners.push(Corner {
                                 p: c,
                                 virtual_: true,
@@ -581,26 +584,30 @@ impl Features {
             xs.push((c.c[0], format!("circle:{i}"), c.c));
             ys.push((c.c[1], format!("circle:{i}"), c.c));
         }
-        for (i, c) in self.slot_ends.iter().enumerate() {
-            xs.push((c[0], format!("slot:{i}"), *c));
-            ys.push((c[1], format!("slot:{i}"), *c));
+        for (i, sl) in self.slots.iter().enumerate() {
+            xs.push((sl.centre[0], format!("slot:{i}"), sl.centre));
+            ys.push((sl.centre[1], format!("slot:{i}"), sl.centre));
         }
-        // A field is located by the outer edges of its first and last
-        // cells (the centres of a field of holes).
+        // A field is located by the centres of its first and last cells;
+        // holes on a pitch circle by the circle's centre.
         for (k, p) in self.patterns.iter().enumerate() {
             let tag = format!("pattern:{k}");
-            let (first, last) = (p.centres[0], p.centres[p.count() - 1]);
-            let (lo, hi) = match p.circle {
-                Some(_) => (first, last),
-                None => (p.lo, p.hi),
-            };
-            for y in [lo[1], hi[1]] {
-                xs.push((lo[0], tag.clone(), [lo[0], y]));
-                xs.push((hi[0], tag.clone(), [hi[0], y]));
-            }
-            for x in [lo[0], hi[0]] {
-                ys.push((lo[1], tag.clone(), [x, lo[1]]));
-                ys.push((hi[1], tag.clone(), [x, hi[1]]));
+            match p.kind {
+                Kind::Grid { .. } => {
+                    let (lo, hi) = (p.first(), p.last());
+                    for y in [lo[1], hi[1]] {
+                        xs.push((lo[0], tag.clone(), [lo[0], y]));
+                        xs.push((hi[0], tag.clone(), [hi[0], y]));
+                    }
+                    for x in [lo[0], hi[0]] {
+                        ys.push((lo[1], tag.clone(), [x, lo[1]]));
+                        ys.push((hi[1], tag.clone(), [x, hi[1]]));
+                    }
+                }
+                Kind::Polar { centre, .. } => {
+                    xs.push((centre[0], tag.clone(), centre));
+                    ys.push((centre[1], tag, centre));
+                }
             }
         }
         for b in &self.bends {

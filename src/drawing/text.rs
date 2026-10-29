@@ -112,7 +112,7 @@ const LABELS: &[(&str, [&str; 3])] = &[
     ("up", ["OP", "UP", "HAUT"]),
     ("down", ["NEER", "DOWN", "BAS"]),
     ("mm", ["Maten in mm", "Dimensions in mm", "Cotes en mm"]),
-    ("pitch", ["steek", "pitch", "pas"]),
+    ("cc", ["h.o.h.", "c/c", "entraxe"]),
     ("deburr", ["Kanten ontbraamd", "Edges deburred", "Arêtes ébavurées"]),
     (
         "bend_note",

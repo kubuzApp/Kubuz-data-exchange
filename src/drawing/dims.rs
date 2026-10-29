@@ -19,6 +19,7 @@
 //! place on the sheet; the scale `s` maps model to paper.
 
 use super::features::{arc_mid, Features};
+use super::pattern::{slot_text, Kind as PatternKind};
 use super::text::{self, Lang};
 use crate::dxf::blank::{BendLine, Seg, P2};
 use crate::pdf::{font, Content};
@@ -50,6 +51,8 @@ const TAG_PITCH: f64 = 5.6;
 const OVERSHOOT: f64 = 2.0;
 /// How far a local callout's leader runs out from the feature's edge.
 const LEADER: f64 = 5.0;
+/// A field of more holes than this gets no centre marks on its holes.
+const MARKED_HOLES: usize = 48;
 pub const WIDE: f64 = 0.5;
 pub const NARROW: f64 = 0.25;
 const SAME: f64 = super::features::SAME;
@@ -63,6 +66,9 @@ pub struct Station {
     pub sources: Vec<String>,
     /// The extension line starts right at `from` (a bend line's end).
     pub no_gap: bool,
+    /// From here to the next station run this many equal spaces of this
+    /// pitch (the cells of a field), written once: `8× 33,33 (=266,6)`.
+    pub run: Option<(usize, f64)>,
 }
 
 /// One value of a chain, placed.
@@ -114,6 +120,9 @@ pub struct Callout {
     pub at: P2,
     /// A second line under the text: a field's grid and pitch.
     pub note: Option<String>,
+    /// Paper bend of a leader that runs level from the text past the
+    /// chains before it turns to the feature.
+    pub elbow: Option<P2>,
 }
 
 #[derive(Clone, Debug)]
@@ -130,11 +139,33 @@ pub struct Tag {
     pub note: Option<(String, P2, f64)>,
 }
 
+/// The angle of a pitch circle's first hole from +x: the arc's paper
+/// radius, the base and the ray (paper, from the centre), the value and
+/// where it is written.
+#[derive(Clone, Debug)]
+pub struct AngleDim {
+    pub ra: f64,
+    pub base: [P2; 2],
+    pub ray: [P2; 2],
+    pub text: String,
+    pub at: P2,
+}
+
+/// A pitch circle on paper, and the first hole's angle when it is not
+/// on the axis.
+#[derive(Clone, Debug)]
+pub struct PolarDim {
+    pub centre: P2,
+    pub r: f64,
+    pub angle: Option<AngleDim>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub s: f64,
     pub chains: Vec<Chain>,
     pub callouts: Vec<Callout>,
+    pub polars: Vec<PolarDim>,
     pub tags: Vec<Tag>,
     /// Paper mm beyond the scaled blank: left, bottom, right, top.
     pub margin: [f64; 4],
@@ -276,6 +307,23 @@ fn edge_through(f: &Features, p: P2, n: P2) -> bool {
     })
 }
 
+/// The equal spaces a field's first cell starts along `axis`, when the
+/// ordinate is that cell's centre: (count, pitch).
+fn field_run(f: &Features, sources: &[String], axis: usize, value: f64) -> Option<(usize, f64)> {
+    sources.iter().find_map(|src| {
+        let k = src.strip_prefix("pattern:")?.parse::<usize>().ok()?;
+        let p = f.patterns.get(k)?;
+        let PatternKind::Grid { nx, ny, pitch } = p.kind else {
+            return None;
+        };
+        let n = if axis == 0 { nx } else { ny };
+        if n < 2 || (p.first()[axis] - value).abs() > SAME {
+            return None;
+        }
+        Some((n - 1, pitch[axis]))
+    })
+}
+
 /// Whether an outline ordinate belongs on the chain along `n`: one of
 /// its corners ends an edge perpendicular to `n`, or lies on a curve.
 fn locatable(f: &Features, sources: &[String], n: P2) -> bool {
@@ -368,6 +416,19 @@ fn extreme(samples: &[P2], n: P2, e: P2, side: f64, max: bool) -> (f64, P2) {
     (best, at)
 }
 
+/// What a callout says: its kind, value, count, text and note, its
+/// members (a point on each feature's edge and its centre; a slot's two
+/// end centres) and the directions its leader may leave the feature in.
+struct Request {
+    kind: &'static str,
+    value: f64,
+    count: usize,
+    text: String,
+    note: Option<String>,
+    members: Vec<(P2, P2)>,
+    dirs: Option<Vec<P2>>,
+}
+
 pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Layout {
     // The outline sampled on paper: the extremes come from it and nothing
     // may be written on it.
@@ -437,13 +498,16 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
                     from: pick(-1.0),
                     sources,
                     no_gap: true,
+                    run: None,
                 });
             } else if is_hole {
+                let run = field_run(f, &sources, axis, o.value);
                 hole_st.push(Station {
                     t: o.value,
                     from: pick(1.0),
                     sources,
                     no_gap: false,
+                    run,
                 });
             } else if locatable(f, &sources, n) {
                 out_st.push(Station {
@@ -451,6 +515,7 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
                     from: pick(-1.0),
                     sources,
                     no_gap: false,
+                    run: None,
                 });
             }
         }
@@ -551,12 +616,14 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
                     from: pe,
                     sources: vec!["extent".into()],
                     no_gap: true,
+                    run: None,
                 },
                 Station {
                     t,
                     from: pb,
                     sources: vec![format!("bend:{}", j + 1)],
                     no_gap: true,
+                    run: None,
                 },
             ];
             let line = dot(pb, e) * s;
@@ -612,11 +679,92 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
     }
     lines = all_lines;
 
-    // Everything drawn so far is an obstacle for callouts and tags.
+    // Everything drawn so far is an obstacle for callouts and tags, and
+    // so is a field of holes: nothing is written between its cells.
+    let mut drawn: Vec<[P2; 2]> = Vec::new();
     for ch in &chains {
         for pts in chain_lines(ch, s) {
             sample_line(pts[0], pts[1], &mut obstacles);
+            drawn.push(pts);
         }
+    }
+    let mut fields: Vec<[f64; 4]> = Vec::new();
+    for p in &f.patterns {
+        if let PatternKind::Grid { .. } = p.kind {
+            let (lo, hi) = (p.first(), p.last());
+            fields.push([
+                (lo[0] - p.cell[0]) * s,
+                (lo[1] - p.cell[1]) * s,
+                (hi[0] + p.cell[0]) * s,
+                (hi[1] + p.cell[1]) * s,
+            ]);
+        }
+    }
+
+    // Pitch circles: the circle through the holes (long-dashed dotted),
+    // and the angle of the first hole from +x when it is not on the axis.
+    let mut polars: Vec<PolarDim> = Vec::new();
+    for p in &f.patterns {
+        let PatternKind::Polar {
+            centre,
+            r,
+            start_deg,
+            ..
+        } = p.kind
+        else {
+            continue;
+        };
+        let pc = [centre[0] * s, centre[1] * s];
+        let rp = r * s;
+        let mut arc: Vec<P2> = Vec::new();
+        sample(
+            &Seg::Circle {
+                c: centre,
+                r: r + 0.0,
+            },
+            s,
+            &mut arc,
+        );
+        obstacles.extend(arc);
+        let hole = p.circle.unwrap_or(0.0) * s;
+        let angle = (start_deg > 0.0).then(|| {
+            // The arc of the angle between the holes' radius and the
+            // base radius line, inside the pitch circle, its value past
+            // the arc's middle.
+            let ra = (rp - hole - 2.0 * H).max(rp * 0.4);
+            let mid = (start_deg / 2.0).to_radians();
+            let t = text::deg(start_deg);
+            let tw = font::width(&t, H);
+            let at = [
+                pc[0] + (ra + 1.5) * mid.cos() - if mid.cos() < 0.0 { tw } else { 0.0 },
+                pc[1] + (ra + 1.5) * mid.sin() - H / 2.0,
+            ];
+            let bx = [at[0] - 0.8, at[1] - 0.8, at[0] + tw + 0.8, at[1] + H + 0.8];
+            boxes.push(bx);
+            let a = start_deg.to_radians();
+            let far = rp + hole + 3.0;
+            let base = [[pc[0], pc[1]], [pc[0] + far, pc[1]]];
+            let ray = [
+                [pc[0], pc[1]],
+                [pc[0] + far * a.cos(), pc[1] + far * a.sin()],
+            ];
+            for l in [base, ray] {
+                sample_line(l[0], l[1], &mut obstacles);
+                drawn.push(l);
+            }
+            AngleDim {
+                ra,
+                base,
+                ray,
+                text: t,
+                at,
+            }
+        });
+        polars.push(PolarDim {
+            centre: pc,
+            r: rp,
+            angle,
+        });
     }
 
     // Callouts: one per size, next to its feature when a corner of the
@@ -639,28 +787,71 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         .filter(|c| c.side > 0.0 && c.e[0] > 0.5)
         .map(|c| c.line + H + 2.0)
         .fold(w, f64::max);
-    // What each callout says: (kind, value, count, text, note, members).
-    type Request = (
-        &'static str,
-        f64,
-        usize,
-        String,
-        Option<String>,
-        Vec<(P2, P2)>,
-    );
     let mut requests: Vec<Request> = groups
         .into_iter()
         .map(|(kind, value, members)| {
             let n = members.len();
             let sym = if kind == "diameter" { "⌀" } else { "R" };
-            let t = if n > 1 {
+            let text = if n > 1 {
                 format!("{n}× {sym}{}", text::mm(value))
             } else {
                 format!("{sym}{}", text::mm(value))
             };
-            (kind, value, n, t, None, members)
+            Request {
+                kind,
+                value,
+                count: n,
+                text,
+                note: None,
+                members,
+                dirs: None,
+            }
         })
         .collect();
+    // Slots of one size share a callout; the leader lands on the far
+    // end of the one nearest the top right.
+    // Width, length between the end centres, and each slot's end centres
+    // and axis direction.
+    type SlotGroup = (f64, f64, Vec<(P2, P2, P2)>);
+    let mut slot_groups: Vec<SlotGroup> = Vec::new();
+    for sl in &f.slots {
+        let (w, l) = (
+            (sl.width * 10.0).round() / 10.0,
+            (sl.between() * 10.0).round() / 10.0,
+        );
+        let u = unit2(sl.ends[0], sl.ends[1]);
+        let m = (sl.ends[0], sl.ends[1], u);
+        match slot_groups
+            .iter_mut()
+            .find(|g| (g.0 - w).abs() < 1e-9 && (g.1 - l).abs() < 1e-9)
+        {
+            Some(g) => g.2.push(m),
+            None => slot_groups.push((w, l, vec![m])),
+        }
+    }
+    for (w, l, members) in slot_groups {
+        let n = members.len();
+        let one = slot_text(w, l, lang);
+        let text = if n > 1 { format!("{n}× {one}") } else { one };
+        let far = members
+            .iter()
+            .max_by(|a, b| (a.1[0] + 0.25 * a.1[1]).total_cmp(&(b.1[0] + 0.25 * b.1[1])))
+            .unwrap();
+        let u = far.2;
+        let rot = |d: f64| {
+            let (sn, cs) = d.to_radians().sin_cos();
+            [u[0] * cs - u[1] * sn, u[0] * sn + u[1] * cs]
+        };
+        requests.push(Request {
+            kind: "slot",
+            value: w,
+            count: n,
+            text,
+            note: None,
+            members: members.iter().map(|m| (m.0, m.1)).collect(),
+            dirs: Some(vec![rot(45.0), rot(-45.0), u]),
+        });
+    }
     for p in &f.patterns {
         let kind = if p.circle.is_some() {
             "diameter"
@@ -670,33 +861,69 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         let value = p
             .circle
             .map_or(p.cell[0], |r| (r * 2.0 * 10.0).round() / 10.0);
-        requests.push((
+        requests.push(Request {
             kind,
             value,
-            p.count(),
-            p.cell_text(),
-            Some(p.grid_text(lang)),
-            vec![p.leader_cell()],
-        ));
+            count: p.count(),
+            text: p.cell_text(lang),
+            note: p.step_text(),
+            members: vec![p.leader_cell()],
+            dirs: None,
+        });
+        if let PatternKind::Polar {
+            centre,
+            r,
+            start_deg,
+            step_deg,
+        } = p.kind
+        {
+            // The pitch circle's diameter, its leader leaving the circle
+            // halfway between two holes.
+            let d = (2.0 * r * 10.0).round() / 10.0;
+            let dirs = (0..p.count())
+                .map(|k| {
+                    let a = (start_deg + step_deg * (k as f64 + 0.5)).to_radians();
+                    [a.cos(), a.sin()]
+                })
+                .collect();
+            requests.push(Request {
+                kind: "pitch",
+                value: d,
+                count: 1,
+                text: format!("⌀{}", text::mm(d)),
+                note: None,
+                members: vec![([centre[0] + r, centre[1]], centre)],
+                dirs: Some(dirs),
+            });
+        }
     }
     let mut column = 0.0;
-    for (kind, value, n, t, note, members) in &requests {
-        let n = *n;
+    let mut leaders: Vec<[P2; 2]> = Vec::new();
+    for rq in &requests {
+        let (kind, value, n, t, note) = (rq.kind, rq.value, rq.count, &rq.text, &rq.note);
         let tw = note
             .iter()
             .fold(font::width(t, H), |w, l| w.max(font::width(l, H)));
         // A note sits one line under the text.
         let down = if note.is_some() { H + 1.5 } else { 0.0 };
         // The member nearest the top right, where a callout reads best.
-        let (anchor, centre) = *members
+        let (mut anchor, mut centre) = *rq
+            .members
             .iter()
             .max_by(|a, b| (a.1[0] + 0.25 * a.1[1]).total_cmp(&(b.1[0] + 0.25 * b.1[1])))
             .unwrap();
+        // A slot's members are its end centres; the leader lands on the
+        // far end's arc, its radius half the width.
+        if kind == "slot" {
+            anchor = [centre[0] + value / 2.0, centre[1]];
+        }
         let r = dist(anchor, centre) * s;
         let pc = [centre[0] * s, centre[1] * s];
         // Where the leader may leave the feature: a hole from four
         // diagonals, an arc only through the arc itself.
-        let dirs: Vec<P2> = if *kind != "radius" {
+        let dirs: Vec<P2> = if let Some(d) = &rq.dirs {
+            d.clone()
+        } else if kind != "radius" {
             let k = std::f64::consts::FRAC_1_SQRT_2;
             vec![[k, k], [-k, k], [k, -k], [-k, -k]]
         } else {
@@ -720,55 +947,138 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
                 None => vec![],
             }
         };
+        // A leader never runs through a value or another leader; it
+        // keeps off the dimension lines too when it can (ISO 129-1 5.4).
+        let leader_clear = |tip: P2, end: P2, strict: bool| {
+            !boxes.iter().any(|b| crosses_box(tip, end, *b))
+                && !leaders.iter().any(|l| segments_cross(tip, end, l[0], l[1]))
+                && !(strict && drawn.iter().any(|l| segments_cross(tip, end, l[0], l[1])))
+        };
         let mut placed: Option<(P2, P2)> = None;
-        'leader: for leader in [LEADER, LEADER + 7.0, LEADER + 15.0, LEADER + 25.0] {
-            for u in &dirs {
-                let end = [pc[0] + u[0] * (r + leader), pc[1] + u[1] * (r + leader)];
-                let at = if u[0] >= 0.0 {
-                    [end[0] + 1.0, end[1] - H / 2.0]
-                } else {
-                    [end[0] - 1.0 - tw, end[1] - H / 2.0]
-                };
-                let bx = [
-                    at[0] - 0.8,
-                    at[1] - down - 0.8,
-                    at[0] + tw + 0.8,
-                    at[1] + H + 0.8,
-                ];
-                if obstacles.iter().any(|p| inside(bx, *p)) || boxes.iter().any(|b| overlap(bx, *b))
-                {
-                    continue;
+        'leader: for strict in [true, false] {
+            for leader in [LEADER, LEADER + 7.0, LEADER + 15.0, LEADER + 25.0] {
+                for u in &dirs {
+                    let end = [pc[0] + u[0] * (r + leader), pc[1] + u[1] * (r + leader)];
+                    let at = if u[0] >= 0.0 {
+                        [end[0] + 1.0, end[1] - H / 2.0]
+                    } else {
+                        [end[0] - 1.0 - tw, end[1] - H / 2.0]
+                    };
+                    let bx = [
+                        at[0] - 0.8,
+                        at[1] - down - 0.8,
+                        at[0] + tw + 0.8,
+                        at[1] + H + 0.8,
+                    ];
+                    if obstacles.iter().any(|p| inside(bx, *p))
+                        || boxes.iter().chain(&fields).any(|b| overlap(bx, *b))
+                    {
+                        continue;
+                    }
+                    let tip = [pc[0] + u[0] * r, pc[1] + u[1] * r];
+                    if !leader_clear(tip, end, strict) {
+                        continue;
+                    }
+                    let from = if u[0] >= 0.0 {
+                        [at[0] - 0.8, at[1] + H / 2.0]
+                    } else {
+                        [at[0] + tw + 0.8, at[1] + H / 2.0]
+                    };
+                    placed = Some((at, from));
+                    break 'leader;
                 }
-                let from = if u[0] >= 0.0 {
-                    [at[0] - 0.8, at[1] + H / 2.0]
-                } else {
-                    [at[0] + tw + 0.8, at[1] + H / 2.0]
-                };
-                placed = Some((at, from));
-                break 'leader;
             }
         }
-        let (at, from) = placed.unwrap_or_else(|| {
-            let at = [right_edge + CALLOUT_GAP, h - H - column];
-            column += CALLOUT_PITCH + down;
-            (at, [at[0] - 0.8, at[1] + H / 2.0])
-        });
+        // Else in the column up the right side: the first row from which
+        // the leader reaches the feature clear of values and leaders.
+        let (at, from, elbow) = match placed {
+            Some((at, from)) => (at, from, None),
+            None => {
+                // Straight to the feature when that is clear, else level
+                // from the text to just past the blank and from there to
+                // the feature; the first row either works from.
+                let mut pick = (0, None);
+                'rows: for k in 0..8 {
+                    let at = [
+                        right_edge + CALLOUT_GAP,
+                        h - H - column - k as f64 * (CALLOUT_PITCH + down),
+                    ];
+                    let from = [at[0] - 0.8, at[1] + H / 2.0];
+                    let bx = [
+                        at[0] - 0.8,
+                        at[1] - down - 0.8,
+                        at[0] + tw + 0.8,
+                        at[1] + H + 0.8,
+                    ];
+                    if obstacles.iter().any(|p| inside(bx, *p))
+                        || boxes.iter().any(|b| overlap(bx, *b))
+                    {
+                        continue;
+                    }
+                    for elbow in [None, Some([w + 2.0, from[1]])] {
+                        let start = elbow.unwrap_or(from);
+                        let d = dist(start, pc).max(1e-9);
+                        let tip = [
+                            pc[0] + (start[0] - pc[0]) / d * r,
+                            pc[1] + (start[1] - pc[1]) / d * r,
+                        ];
+                        if leader_clear(tip, start, false)
+                            && elbow.is_none_or(|e| leader_clear(e, from, false))
+                        {
+                            pick = (k, elbow);
+                            break 'rows;
+                        }
+                    }
+                }
+                let at = [
+                    right_edge + CALLOUT_GAP,
+                    h - H - column - pick.0 as f64 * (CALLOUT_PITCH + down),
+                ];
+                column += (pick.0 + 1) as f64 * (CALLOUT_PITCH + down);
+                (at, [at[0] - 0.8, at[1] + H / 2.0], pick.1)
+            }
+        };
+        let start = elbow.unwrap_or(from);
+        // Wherever the text landed, a slot's leader meets its outline
+        // square on: from the nearest point of the axis, half a width out.
+        if kind == "slot" {
+            let (a, b) = (anchor_of_slot(rq, centre), centre);
+            let ab = [b[0] - a[0], b[1] - a[1]];
+            let fm = [start[0] / s, start[1] / s];
+            let t =
+                (dot([fm[0] - a[0], fm[1] - a[1]], ab) / dot(ab, ab).max(1e-12)).clamp(0.0, 1.0);
+            centre = add(a, ab, t);
+            anchor = [centre[0] + value / 2.0, centre[1]];
+        }
+        let pc = [centre[0] * s, centre[1] * s];
         boxes.push([
             at[0] - 0.8,
             at[1] - down - 0.8,
             at[0] + tw + 0.8,
             at[1] + H + 0.8,
         ]);
+        // The leader is an obstacle for what comes after.
+        let tip = [
+            pc[0] + (start[0] - pc[0]) / dist(start, pc).max(1e-9) * r,
+            pc[1] + (start[1] - pc[1]) / dist(start, pc).max(1e-9) * r,
+        ];
+        sample_line(tip, start, &mut obstacles);
+        leaders.push([tip, start]);
+        if let Some(e) = elbow {
+            sample_line(e, from, &mut obstacles);
+            leaders.push([e, from]);
+        }
         callouts.push(Callout {
             from,
             text: t.clone(),
             kind,
-            value: *value,
+            value,
             count: n,
             anchor,
             centre,
             at,
             note: note.clone(),
+            elbow,
         });
     }
 
@@ -925,6 +1235,7 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         s,
         chains,
         callouts,
+        polars,
         tags,
         margin: [-ext[0], -ext[1], ext[2] - w, ext[3] - h],
         boxes,
@@ -937,6 +1248,23 @@ fn unit2(a: P2, b: P2) -> P2 {
     let d = [b[0] - a[0], b[1] - a[1]];
     let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
     [d[0] / l, d[1] / l]
+}
+
+/// The other end of the slot whose far end is `far`, among a request's
+/// members.
+fn anchor_of_slot(rq: &Request, far: P2) -> P2 {
+    rq.members
+        .iter()
+        .find(|m| dist(m.1, far) < 1e-9)
+        .map_or(far, |m| m.0)
+}
+
+/// Whether the segments a-b and c-d cross.
+fn segments_cross(a: P2, b: P2, c: P2, d: P2) -> bool {
+    let side = |p: P2, q: P2, r: P2| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    let (s1, s2) = (side(a, b, c), side(a, b, d));
+    let (s3, s4) = (side(c, d, a), side(c, d, b));
+    s1 * s2 < 0.0 && s3 * s4 < 0.0
 }
 
 fn dist_to_line(p: P2, a: P2, b: P2) -> f64 {
@@ -969,12 +1297,14 @@ fn end_stations(
             from: [p0[0] / s, p0[1] / s],
             sources: vec!["extent".into()],
             no_gap: false,
+            run: None,
         },
         Station {
             t: hi,
             from: [p1[0] / s, p1[1] / s],
             sources: vec!["extent".into()],
             no_gap: false,
+            run: None,
         },
     )
 }
@@ -1002,6 +1332,7 @@ fn place_chain(
                     b.sources.push(src);
                 }
             }
+            b.run = b.run.or(a.run);
             true
         } else {
             false
@@ -1105,7 +1436,17 @@ fn place_texts(ch: &mut Chain, s: f64, boxes: &mut Vec<[f64; 4]>, lines: &[[P2; 
         order.reverse();
     }
     let txts: Vec<String> = (0..count)
-        .map(|i| text::mm(stations[i + 1].t - stations[i].t))
+        .map(|i| {
+            let gap = stations[i + 1].t - stations[i].t;
+            match stations[i].run {
+                // ISO 129-1 7.8.1: the number of spaces, the pitch, and
+                // their sum as an auxiliary dimension.
+                Some((n, pitch)) if (gap - n as f64 * pitch).abs() <= 0.1 => {
+                    format!("{n}× {} (={})", text::mm_fine(pitch), text::mm(gap))
+                }
+                _ => text::mm(gap),
+            }
+        })
         .collect();
     let tws: Vec<f64> = txts.iter().map(|t| font::width(t, H)).collect();
     let mids: Vec<P2> = (0..count)
@@ -1522,12 +1863,42 @@ pub fn draw(lo: &Layout, f: &Features, c: &mut Content, o: P2) {
     c.width(NARROW);
     c.solid();
 
-    // Centre marks on holes.
-    for ci in &f.circles {
-        let cc = pm(ci.c);
-        let e = (ci.r * s + 1.5).max(2.0);
+    // Centre marks on holes, the holes of a field included when there
+    // are few enough for the marks to read.
+    let marks = f.circles.iter().map(|ci| (ci.c, ci.r)).chain(
+        f.patterns
+            .iter()
+            .filter(|p| p.count() <= MARKED_HOLES)
+            .filter_map(|p| p.circle.map(|r| (p, r)))
+            .flat_map(|(p, r)| p.centres.iter().map(move |c| (*c, r))),
+    );
+    for (centre, r) in marks {
+        let cc = pm(centre);
+        let e = (r * s + 1.5).max(2.0);
         c.line([cc[0] - e, cc[1]], [cc[0] + e, cc[1]]);
         c.line([cc[0], cc[1] - e], [cc[0], cc[1] + e]);
+    }
+
+    // Pitch circles (ISO 128-24 long-dashed dotted narrow line) and the
+    // angle of the first hole.
+    for p in &lo.polars {
+        c.dash(&[6.0, 1.0, 0.75, 1.0], 0.0);
+        c.circle(pp(p.centre), p.r);
+        c.solid();
+        if let Some(a) = &p.angle {
+            c.line(pp(a.base[0]), pp(a.base[1]));
+            c.line(pp(a.ray[0]), pp(a.ray[1]));
+            let end = (a.ray[1][1] - a.ray[0][1])
+                .atan2(a.ray[1][0] - a.ray[0][0])
+                .to_degrees();
+            c.arc(pp(p.centre), a.ra, 0.0, end);
+            // Arrowheads along the arc's tangents, pointing out of it.
+            let pc = pp(p.centre);
+            arrow(c, [pc[0] + a.ra, pc[1]], [0.0, -1.0]);
+            let (sn, cs) = end.to_radians().sin_cos();
+            arrow(c, [pc[0] + a.ra * cs, pc[1] + a.ra * sn], [-sn, cs]);
+            c.text(pp(a.at), H, 0.0, &a.text);
+        }
     }
 
     for ch in &lo.chains {
@@ -1576,6 +1947,13 @@ pub fn draw(lo: &Layout, f: &Features, c: &mut Content, o: P2) {
     for co in &lo.callouts {
         let at = pp(co.at);
         let start = pp(co.from);
+        let start = match co.elbow {
+            Some(e) => {
+                c.line(start, pp(e));
+                pp(e)
+            }
+            None => start,
+        };
         let centre = pm(co.centre);
         let d = [centre[0] - start[0], centre[1] - start[1]];
         let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
