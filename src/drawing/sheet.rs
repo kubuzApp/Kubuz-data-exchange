@@ -1,5 +1,5 @@
 //! The sheet around a drawing: ISO 5457 sizes, margins, frame, centring
-//! and trimming marks, a grid reference (numbers along the top and bottom,
+//! marks (no trimming marks), a grid reference (numbers along the top and bottom,
 //! letters down the sides), and a title block of 180 × 48 mm in the
 //! Kubuz layout: who drew and approved it and when, scale, size and
 //! projection symbol, material, thickness, weight and folded extents, the
@@ -330,13 +330,7 @@ pub fn frame_form(
     c.caps_butt_joins_round();
     c.fill_gray(0.0);
 
-    // Trimming marks: two overlapping 10 × 5 rectangles in each corner.
-    for (cx, sx) in [(0.0, 1.0), (w, -1.0)] {
-        for (cy, sy) in [(0.0, 1.0), (h, -1.0)] {
-            c.rect_fill(cx.min(cx + sx * 10.0), cy.min(cy + sy * 5.0), 10.0, 5.0);
-            c.rect_fill(cx.min(cx + sx * 5.0), cy.min(cy + sy * 10.0), 5.0, 10.0);
-        }
-    }
+    // No trimming marks: sheets print on their own format, nothing to trim.
     // Centring marks, 0,7 mm, from the sheet edge to 5 mm inside the frame.
     c.width(0.7);
     // The bottom mark stops at the frame where the title block is.
