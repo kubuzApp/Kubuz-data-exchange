@@ -112,6 +112,7 @@ const LABELS: &[(&str, [&str; 3])] = &[
     ("up", ["OP", "UP", "HAUT"]),
     ("down", ["NEER", "DOWN", "BAS"]),
     ("mm", ["Maten in mm", "Dimensions in mm", "Cotes en mm"]),
+    ("pitch", ["steek", "pitch", "pas"]),
     ("deburr", ["Kanten ontbraamd", "Edges deburred", "Arêtes ébavurées"]),
     (
         "bend_note",
@@ -257,6 +258,17 @@ const LABELS: &[(&str, [&str; 3])] = &[
 /// `1001,6`, `0,5`. Never `-0`.
 pub fn mm(v: f64) -> String {
     tenth(v)
+}
+
+/// A length in mm to a hundredth, for a pitch that adds up over a field:
+/// `33,33`, `40`.
+pub fn mm_fine(v: f64) -> String {
+    let t = (v * 100.0).round() as i64;
+    if t % 10 == 0 {
+        return tenth(v);
+    }
+    let (sign, t) = if t < 0 { ("-", -t) } else { ("", t) };
+    format!("{sign}{},{:02}", t / 100, t % 100)
 }
 
 /// An angle in degrees to a tenth with the degree sign: `90°`, `45,5°`.

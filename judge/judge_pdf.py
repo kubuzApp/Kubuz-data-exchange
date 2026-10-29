@@ -95,6 +95,15 @@ def mm_text(v):
     return f"{r:.1f}".replace(".", ",")
 
 
+def fine_text(v):
+    """A pitch as the drawing writes it: to a hundredth when a tenth would
+    drift over the field."""
+    r = round(v, 2)
+    if abs(r - round(r, 1)) < 1e-9:
+        return mm_text(r)
+    return f"{r:.2f}".replace(".", ",")
+
+
 # --- DXF --------------------------------------------------------------------
 
 
@@ -197,6 +206,68 @@ def virtual_corners(d, bound):
             if -2 * bound <= t <= lp + 2 * bound and -2 * bound <= s2 <= lq + 2 * bound:
                 out.append((p[0] + u[0] * t, p[1] + u[1] * t))
     return out
+
+
+def cutouts(d):
+    """The inner contours of the blank that are not circles, each as
+    (lo, hi, segment count, points: ends, arc centres and extremes): the CUT lines and arcs joined end to end, the
+    contour with the widest extent being the outline."""
+    segs = [(a, b) for a, b in d["lines"]]
+    segs += [(arc_point(c, r, a0), arc_point(c, r, a1)) for c, r, a0, a1 in d["arcs"]]
+    parent = list(range(len(segs)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    ends = {}
+    for i, (a, b) in enumerate(segs):
+        for p in (a, b):
+            k = (round(p[0], 2), round(p[1], 2))
+            if k in ends:
+                parent[find(i)] = find(ends[k])
+            else:
+                ends[k] = i
+    groups = {}
+    for i in range(len(segs)):
+        groups.setdefault(find(i), []).append(i)
+    boxes = []
+    for members in groups.values():
+        pts = [p for i in members for p in segs[i]]
+        for c, r, a0, a1 in (d["arcs"][i - len(d["lines"])] for i in members if i >= len(d["lines"])):
+            pts.append(c)
+            sweep = (a1 - a0) % 360.0
+            for q in (0.0, 90.0, 180.0, 270.0):
+                if (q - a0) % 360.0 <= sweep:
+                    pts.append(arc_point(c, r, q))
+        lo = (min(p[0] for p in pts), min(p[1] for p in pts))
+        hi = (max(p[0] for p in pts), max(p[1] for p in pts))
+        boxes.append((lo, hi, len(members), pts))
+    if not boxes:
+        return []
+    outer = max(range(len(boxes)), key=lambda i: max(boxes[i][1][0] - boxes[i][0][0], boxes[i][1][1] - boxes[i][0][1]))
+    return [b for i, b in enumerate(boxes) if i != outer]
+
+
+def grid(centres):
+    """(nx, ny, pitch x, pitch y) when the centres fill an equally spaced
+    grid, else None."""
+    axes = []
+    for k in (0, 1):
+        vs = []
+        for v in sorted(c[k] for c in centres):
+            if not vs or v - vs[-1] > 0.02:
+                vs.append(v)
+        pitch = (vs[-1] - vs[0]) / (len(vs) - 1) if len(vs) > 1 else 0.0
+        if any(abs(b - a - pitch) > 0.02 for a, b in zip(vs, vs[1:])):
+            return None
+        axes.append((len(vs), pitch))
+    (nx, px), (ny, py) = axes
+    if nx * ny != len(centres) or max(nx, ny) < 3:
+        return None
+    return nx, ny, px, py
 
 
 def dxf_extent(d):
@@ -614,9 +685,45 @@ def flat_problems(sheet, d, words, folded_solid, scale=1.0):
         problems.append("no chain along x")
     if (0.0, 1.0) not in stations:
         problems.append("no chain along y")
+    # Holes and cut-outs: each located, or, six or more equal ones on an
+    # equally spaced grid, the field located by its outer cells (edges of
+    # cut-outs, centres of holes) and called out with its grid.
+    groups = {}
     for c, r in d["circles"]:
-        if not located((1.0, 0.0), c[0]) or not located((0.0, 1.0), c[1]):
-            problems.append(f"hole at ({mm_text(c[0])}, {mm_text(c[1])}) not located")
+        groups.setdefault(("circle", round(2 * r, 1)), []).append(((c[0] - r, c[1] - r), (c[0] + r, c[1] + r), [c]))
+    for lo, hi, n, pts in cutouts(d):
+        key = ("cutout", round(hi[0] - lo[0], 2), round(hi[1] - lo[1], 2), n)
+        groups.setdefault(key, []).append((lo, hi, pts))
+    for key, members in groups.items():
+        hole = key[0] == "circle"
+        centres = [((m[0][0] + m[1][0]) / 2, (m[0][1] + m[1][1]) / 2) for m in members]
+        g = grid(centres) if len(members) >= 6 else None
+        if g is None:
+            for (lo, hi, pts), c in zip(members, centres):
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                if not any(located((1.0, 0.0), x) for x in xs) or not any(located((0.0, 1.0), y) for y in ys):
+                    what = "hole" if hole else "cut-out"
+                    problems.append(f"{what} at ({mm_text(c[0])}, {mm_text(c[1])}) not located")
+            continue
+        nx, ny, px, py = g
+        if hole:
+            ends = [(min(c[0] for c in centres), min(c[1] for c in centres)), (max(c[0] for c in centres), max(c[1] for c in centres))]
+        else:
+            ends = [(min(m[0][0] for m in members), min(m[0][1] for m in members)), (max(m[1][0] for m in members), max(m[1][1] for m in members))]
+        label = f"field of {len(members)} at ({mm_text(ends[0][0])}, {mm_text(ends[0][1])})"
+        for p in ends:
+            if not located((1.0, 0.0), p[0]) or not located((0.0, 1.0), p[1]):
+                problems.append(f"{label}: outer cell at ({mm_text(p[0])}, {mm_text(p[1])}) not located")
+        if not hole:
+            want = f"{len(members)}× {mm_text(key[1])} × {mm_text(key[2])}"
+            if want not in words:
+                problems.append(f"{label}: no callout {want!r}")
+        pitch = fine_text(px if nx > 1 else py)
+        if nx > 1 and ny > 1 and abs(px - py) > 0.02:
+            pitch = f"{fine_text(px)} × {fine_text(py)}"
+        if not any(w.startswith(f"{nx} × {ny}, ") and w.endswith(f" {pitch}") for w in words):
+            problems.append(f"{label}: grid {nx} × {ny}, pitch {pitch} not called out")
     for nr, (a, b) in enumerate(d["bends"], 1):
         ln = math.dist(a, b)
         if ln < 1e-9:
