@@ -128,7 +128,7 @@ if (flat.ok) {
 Every distinct blank gets a sheet (parts that share a blank share a sheet;
 `quantity` says how many to make), on A4 portrait or A3 landscape, at the
 largest ISO 5455 scale that fits; the title block is the same size on both.
-The sheet follows ISO 5457 (frame, centring and trimming marks, the grid
+The sheet follows ISO 5457 (frame, centring marks, the grid
 reference `1 2 3 4 …` and `A B C …` around the frame), the title block the
 Kubuz template on ISO 7200 (designer, design date, approved, approved date,
 scale, size, projection symbol, material, thickness, weight, the flat
