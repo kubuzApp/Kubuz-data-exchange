@@ -27,6 +27,7 @@ pub mod folded;
 pub mod iso;
 pub mod lists;
 pub mod logo;
+pub mod pattern;
 pub mod project;
 pub mod running;
 pub mod section;

@@ -112,6 +112,8 @@ pub struct Callout {
     pub centre: P2,
     /// Paper start of the text (baseline).
     pub at: P2,
+    /// A second line under the text: a field's grid and pitch.
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -417,7 +419,11 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
                 continue;
             }
             let is_bend = sources.iter().any(|s| s.starts_with("bend:"));
-            let is_hole = sources.iter().any(|s| s.starts_with("circle:"));
+            let is_hole = sources.iter().any(|s| {
+                ["circle:", "slot:", "pattern:"]
+                    .iter()
+                    .any(|k| s.starts_with(k))
+            });
             // Extension line start: the point nearest the dimension line.
             let pick = |side: f64| -> P2 {
                 *o.points
@@ -633,16 +639,54 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         .filter(|c| c.side > 0.0 && c.e[0] > 0.5)
         .map(|c| c.line + H + 2.0)
         .fold(w, f64::max);
-    let mut column = 0usize;
-    for (kind, value, members) in &groups {
-        let n = members.len();
-        let sym = if *kind == "diameter" { "⌀" } else { "R" };
-        let t = if n > 1 {
-            format!("{n}× {sym}{}", text::mm(*value))
+    // What each callout says: (kind, value, count, text, note, members).
+    type Request = (
+        &'static str,
+        f64,
+        usize,
+        String,
+        Option<String>,
+        Vec<(P2, P2)>,
+    );
+    let mut requests: Vec<Request> = groups
+        .into_iter()
+        .map(|(kind, value, members)| {
+            let n = members.len();
+            let sym = if kind == "diameter" { "⌀" } else { "R" };
+            let t = if n > 1 {
+                format!("{n}× {sym}{}", text::mm(value))
+            } else {
+                format!("{sym}{}", text::mm(value))
+            };
+            (kind, value, n, t, None, members)
+        })
+        .collect();
+    for p in &f.patterns {
+        let kind = if p.circle.is_some() {
+            "diameter"
         } else {
-            format!("{sym}{}", text::mm(*value))
+            "pattern"
         };
-        let tw = font::width(&t, H);
+        let value = p
+            .circle
+            .map_or(p.cell[0], |r| (r * 2.0 * 10.0).round() / 10.0);
+        requests.push((
+            kind,
+            value,
+            p.count(),
+            p.cell_text(),
+            Some(p.grid_text(lang)),
+            vec![p.leader_cell()],
+        ));
+    }
+    let mut column = 0.0;
+    for (kind, value, n, t, note, members) in &requests {
+        let n = *n;
+        let tw = note
+            .iter()
+            .fold(font::width(t, H), |w, l| w.max(font::width(l, H)));
+        // A note sits one line under the text.
+        let down = if note.is_some() { H + 1.5 } else { 0.0 };
         // The member nearest the top right, where a callout reads best.
         let (anchor, centre) = *members
             .iter()
@@ -652,7 +696,7 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         let pc = [centre[0] * s, centre[1] * s];
         // Where the leader may leave the feature: a hole from four
         // diagonals, an arc only through the arc itself.
-        let dirs: Vec<P2> = if *kind == "diameter" {
+        let dirs: Vec<P2> = if *kind != "radius" {
             let k = std::f64::consts::FRAC_1_SQRT_2;
             vec![[k, k], [-k, k], [k, -k], [-k, -k]]
         } else {
@@ -685,7 +729,12 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
                 } else {
                     [end[0] - 1.0 - tw, end[1] - H / 2.0]
                 };
-                let bx = [at[0] - 0.8, at[1] - 0.8, at[0] + tw + 0.8, at[1] + H + 0.8];
+                let bx = [
+                    at[0] - 0.8,
+                    at[1] - down - 0.8,
+                    at[0] + tw + 0.8,
+                    at[1] + H + 0.8,
+                ];
                 if obstacles.iter().any(|p| inside(bx, *p)) || boxes.iter().any(|b| overlap(bx, *b))
                 {
                     continue;
@@ -700,23 +749,26 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
             }
         }
         let (at, from) = placed.unwrap_or_else(|| {
-            let at = [
-                right_edge + CALLOUT_GAP,
-                h - H - CALLOUT_PITCH * column as f64,
-            ];
-            column += 1;
+            let at = [right_edge + CALLOUT_GAP, h - H - column];
+            column += CALLOUT_PITCH + down;
             (at, [at[0] - 0.8, at[1] + H / 2.0])
         });
-        boxes.push([at[0] - 0.8, at[1] - 0.8, at[0] + tw + 0.8, at[1] + H + 0.8]);
+        boxes.push([
+            at[0] - 0.8,
+            at[1] - down - 0.8,
+            at[0] + tw + 0.8,
+            at[1] + H + 0.8,
+        ]);
         callouts.push(Callout {
             from,
-            text: t,
+            text: t.clone(),
             kind,
             value: *value,
             count: n,
             anchor,
             centre,
             at,
+            note: note.clone(),
         });
     }
 
@@ -1533,6 +1585,9 @@ pub fn draw(lo: &Layout, f: &Features, c: &mut Content, o: P2) {
         c.line(start, tip);
         arrow(c, tip, u);
         c.text(at, H, 0.0, &co.text);
+        if let Some(note) = &co.note {
+            c.text([at[0], at[1] - H - 1.5], H, 0.0, note);
+        }
     }
 
     // Bend lines, extended past the outline, their notes and tags.

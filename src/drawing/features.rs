@@ -5,6 +5,7 @@
 //! becomes one circle again, so that a dimension lands on a feature, never
 //! on a seam of the model.
 
+use super::pattern::{patterns, Pattern};
 use crate::dxf::blank::{arc_point, Blank, Seg, P2};
 
 const TOL: f64 = 1e-4;
@@ -98,6 +99,11 @@ pub struct Features {
     /// lines turning gently, that approximate a curve. They are dimensioned
     /// by their ends and extreme points only; the DXF carries the shape.
     pub curves: Vec<Curve>,
+    /// Fields of equal cut-outs, dimensioned as one: their member loops
+    /// add no corners or circles of their own.
+    pub patterns: Vec<Pattern>,
+    /// The centres of the round ends of slots.
+    pub slot_ends: Vec<P2>,
     /// How many corners were left out as minor.
     pub minor: usize,
     pub xs: Vec<Ordinate>,
@@ -112,7 +118,12 @@ pub fn features(blank: &Blank) -> Features {
         ..Features::default()
     };
     let outer = outer_loop(&f.loops);
+    f.patterns = patterns(&f.loops);
+    let in_pattern: Vec<usize> = f.patterns.iter().flat_map(|p| p.loops.clone()).collect();
     for (li, lp) in f.loops.iter().enumerate() {
+        if in_pattern.contains(&li) {
+            continue;
+        }
         if let [Seg::Circle { c, r }] = lp.as_slice() {
             f.circles.push(Circle { c: *c, r: *r });
             continue;
@@ -191,8 +202,12 @@ pub fn features(blank: &Blank) -> Features {
                                 minor,
                                 on_curve: false,
                             });
+                        } else if li != outer {
+                            // Parallel lines in a cut-out: a slot end. Its
+                            // centre fixes it, like a hole's.
+                            f.slot_ends.push(c);
                         } else {
-                            // Parallel lines: a slot end. Its centre fixes it.
+                            // A rounded tab on the outline.
                             f.corners.push(Corner {
                                 p: c,
                                 virtual_: true,
@@ -505,7 +520,7 @@ fn faired(a: &Seg, b: &Seg) -> bool {
 
 /// The points where a run of segments reaches furthest left, right, down
 /// and up, leaving out any near `skip`.
-fn extremes<'a>(segs: impl Iterator<Item = &'a Seg>, skip: &[P2]) -> Vec<P2> {
+pub(crate) fn extremes<'a>(segs: impl Iterator<Item = &'a Seg>, skip: &[P2]) -> Vec<P2> {
     let mut cands: Vec<P2> = Vec::new();
     for s in segs {
         let (a, b) = ends(s);
@@ -565,6 +580,28 @@ impl Features {
         for (i, c) in self.circles.iter().enumerate() {
             xs.push((c.c[0], format!("circle:{i}"), c.c));
             ys.push((c.c[1], format!("circle:{i}"), c.c));
+        }
+        for (i, c) in self.slot_ends.iter().enumerate() {
+            xs.push((c[0], format!("slot:{i}"), *c));
+            ys.push((c[1], format!("slot:{i}"), *c));
+        }
+        // A field is located by the outer edges of its first and last
+        // cells (the centres of a field of holes).
+        for (k, p) in self.patterns.iter().enumerate() {
+            let tag = format!("pattern:{k}");
+            let (first, last) = (p.centres[0], p.centres[p.count() - 1]);
+            let (lo, hi) = match p.circle {
+                Some(_) => (first, last),
+                None => (p.lo, p.hi),
+            };
+            for y in [lo[1], hi[1]] {
+                xs.push((lo[0], tag.clone(), [lo[0], y]));
+                xs.push((hi[0], tag.clone(), [hi[0], y]));
+            }
+            for x in [lo[0], hi[0]] {
+                ys.push((lo[1], tag.clone(), [x, lo[1]]));
+                ys.push((hi[1], tag.clone(), [x, hi[1]]));
+            }
         }
         for b in &self.bends {
             let tag = format!("bend:{}", b.nr);
