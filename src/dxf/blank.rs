@@ -105,15 +105,30 @@ impl Blank {
     /// the blank's scaled millimetres) back in the solid's own
     /// coordinates.
     pub fn to_solid(&self, p: P3) -> P3 {
+        self.to_solid_at(p, self.frame.d)
+    }
+
+    /// As [`Blank::to_solid`] with the outer skin put at `d` along the
+    /// skin's normal instead of where the solid has it.
+    pub fn to_solid_at(&self, p: P3, d: f64) -> P3 {
         let f = &self.frame;
         let a = f.sx * (p[0] - f.shift[0]) / f.scale;
         let b = (p[1] - f.shift[1]) / f.scale;
-        let c = f.d + p[2] / f.scale;
+        let c = d + p[2] / f.scale;
         [
             f.u[0] * a + f.v[0] * b + f.n[0] * c,
             f.u[1] * a + f.v[1] * b + f.n[1] * c,
             f.u[2] * a + f.v[2] * b + f.n[2] * c,
         ]
+    }
+
+    /// Where the solid's outer skin sits along its normal, as a vector
+    /// in the solid's own coordinates. A flat view has a part's neutral
+    /// plane at its origin and its outer skin this far from it; placed
+    /// (folded), the kernel puts the outer skin at the origin.
+    pub fn skin_offset(&self) -> P3 {
+        let f = &self.frame;
+        [f.n[0] * f.d, f.n[1] * f.d, f.n[2] * f.d]
     }
 }
 

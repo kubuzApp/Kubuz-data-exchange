@@ -219,11 +219,20 @@ Numbers are written to a tenth with a decimal comma and no trailing zero
 The dossier follows the material through the workshop. It opens with a
 **cover** (title, number, revision, customer, date, the totals per
 material and thickness, and a table of contents whose rows are links),
-then the **assembly sheet** on A3: every part folded and placed as the view
-places it, as one isometric with hidden lines removed and an item balloon
-(ISO 6433) per position, with the **parts list** (ISO 7573) beside it:
-position, quantity, description, material, thickness, flat size, folded
-size and weight. Then the **laser list** per material and thickness (flat
+then the **assembly sheet** on A3: every part placed as the view places it
+(a bent part folded from its blank, a plate, a bar or a tube as its solid),
+as one isometric with hidden lines removed, tangent edges thin, and an
+item balloon (ISO 6433) per position, with the **parts list** (ISO 7573)
+beside it: position, quantity, description, material, thickness, flat size,
+folded size and weight. A dossier of two or more parts then gets the
+**general arrangement** on A3 (ISO 128-30, first angle: front view, top
+view under it, left side view right of it) with the overall length, width
+and height and, for every position whose parts stand at one pitch along an
+axis (the bars of a balustrade), the run `37× 107,84 (=3990)` from the
+first centre to the last, chained to the edges (ISO 129-1). A flat view
+places a sheet part by its neutral plane; the dossier puts every part's
+outer skin at its origin, where the kernel has it once folded, so the
+placed parts sit as the folded view has them. Then the **laser list** per material and thickness (flat
 size, cut length, holes, net area, weight per piece and in total) and the
 **bend list** per tool (thickness and inside radius: every bend's angle,
 direction, radius, allowance and length). The part sheets come last, in
@@ -242,10 +251,13 @@ with its cut and the pieces it shows, the folded extents, where the
 isometric sits, and, for a folded sheet, each view's frame and origin in
 part coordinates, so an outside judge can rebuild the part from the drawing
 alone, plus its page, route, weight, cut length, net area and hole count.
-`lists` says where the cover, the assembly, the parts list, the laser list
-and the bend list are, and `assembly` where the isometric sits and where
-every balloon points. Parts that cannot be drawn (a mesh, a mirrored
-folded part) are listed under `skipped`.
+`lists` says where the cover, the assembly, the general arrangement, the
+parts list, the laser list and the bend list are, `assembly` where the
+isometric sits and where every balloon points, and `arrangement` the
+placed parts' extents, each view's origin and bounds on the sheet, and
+every dimension (the overall values and the runs with their position,
+count, pitch and first centre). Parts that cannot be drawn (a mesh, a
+mirrored folded part) are listed under `skipped`.
 
 From the command line:
 
@@ -320,7 +332,11 @@ so a cabinet of twelve equal plates is one model with twelve occurrences.
 The Rust types are in [`src/view.rs`](src/view.rs). A field is renamed only
 with a matching change in the kernel. The fixtures `mesh_*.view.json` and
 `four_down_mirrored.view.json` cover the two additions above; the
-`*_flat.view.json` fixtures are flat views with bends.
+`*_flat.view.json` fixtures are flat views with bends. `balustrade.view.json`
+(a balcony: 55 parts, an L-shaped rail, 51 bars) and
+`balustrade_straight.view.json` (40 parts, 38 bars at one pitch) are the
+flat views the CPQ hands the dossier for its balustrade, bars and plates
+together.
 
 ## The judge
 
@@ -375,7 +391,13 @@ weight, every balloon is drawn where the report says, the laser list's cut
 lengths and hole counts are what the judge sums and counts from the DXF,
 the bend list carries every bend's angle, radius and DXF line length, and
 every link annotation points at a page, every sheet back at the parts list
-and every parts list row at its sheet. A folded sheet
+and every parts list row at its sheet. The general arrangement is judged
+against the placed parts (the folded twin of a flat view, or the view
+itself with every sheet part's outer skin at its origin): the extents and
+the three views' sizes, the overall values, every line of three or more
+equally spaced parts of one position has its run, every run rebuilds its
+centres from the printed count, pitch and first centre, and the chain to
+the edges is printed. A folded sheet
 is judged against the view it was drawn from (`--views`): every ordinate
 is, in its view's frame, a vertex, a hole centre, a circle's extreme, a
 cylinder's silhouette or the corner of two edge-on faces; every chain runs

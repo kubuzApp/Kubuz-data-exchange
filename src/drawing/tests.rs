@@ -144,7 +144,7 @@ fn the_json_result_carries_the_pdf_in_base64() {
 fn the_dossier_opens_with_cover_assembly_and_lists_in_production_order() {
     let out = write_drawings(&view("deck_splash_flat"), &Meta::default()).unwrap();
     let kinds: Vec<&str> = out.lists.iter().map(|l| l.kind.as_str()).collect();
-    assert_eq!(kinds, ["cover", "assembly", "laser", "bend"]);
+    assert_eq!(kinds, ["cover", "assembly", "arrangement", "laser", "bend"]);
     let first_sheet = out.lists.iter().map(|l| l.page + l.pages).max().unwrap();
     for (k, s) in out.sheets.iter().enumerate() {
         assert_eq!(s.page, first_sheet + k, "{}", s.title);
@@ -210,4 +210,62 @@ fn the_dossier_opens_with_cover_assembly_and_lists_in_production_order() {
         .unwrap();
     assert_eq!(twin.blank, mirrored.blank);
     assert!(out.pdf.len() < 25_000 + 6_000 * (out.sheets.len() + 4));
+}
+
+#[test]
+fn the_balustrade_places_every_bar_and_dimensions_their_pitch() {
+    // The straight balustrade: a rail, a floor strip and 38 bars at one
+    // pitch, all in the isometric (a balloon per position) and on the
+    // general arrangement with its overall sizes and the run of the bars.
+    let out = write_drawings(&view("balustrade_straight"), &Meta::default()).unwrap();
+    let kinds: Vec<&str> = out.lists.iter().map(|l| l.kind.as_str()).collect();
+    assert_eq!(kinds, ["cover", "assembly", "arrangement", "laser"]);
+    let asm = out.assembly.expect("assembly");
+    let mut pos: Vec<usize> = asm.balloons.iter().map(|b| b.pos).collect();
+    pos.sort_unstable();
+    assert_eq!(pos, [1, 2, 3]);
+    let arr = out.arrangement.expect("arrangement");
+    assert_eq!(arr.paper, "A3");
+    let ext = arr.extents;
+    // The strip from 0 to 10, the bars 10 to 1090, the rail 1090 to 1100:
+    // the outer skins at the parts' origins, as the folded view has them.
+    for (got, want) in ext.iter().zip([0.0, 50.0, 0.0, 4000.0, 150.0, 1100.0]) {
+        assert!((got - want).abs() < 1e-6, "extents {ext:?}");
+    }
+    let texts: Vec<&str> = arr.dimensions.iter().map(|d| d.text.as_str()).collect();
+    for want in ["4000", "100", "1100"] {
+        assert!(texts.contains(&want), "{texts:?}");
+    }
+    let run = arr
+        .dimensions
+        .iter()
+        .find(|d| d.kind == "run")
+        .expect("run");
+    assert_eq!(run.text, "37× 107,84 (=3990)");
+    assert_eq!(run.axis, "x");
+    assert_eq!(run.count, Some(37));
+    assert!((run.first.unwrap() - 5.0).abs() < 1e-6);
+    // Three views in first angle: the top view under the front view, the
+    // left view right of it, at one scale.
+    let v = |name: &str| arr.views.iter().find(|v| v.name == name).unwrap().bbox;
+    let (f, t, l) = (v("front"), v("top"), v("left"));
+    assert!(t[3] < f[1] && (t[0] - f[0]).abs() < 1e-6);
+    assert!(l[0] > f[2] && (l[1] - f[1]).abs() < 1e-6);
+    let s = arr.scale_factor;
+    assert!(((f[2] - f[0]) - 4000.0 * s).abs() < 1e-6);
+    assert!(((f[3] - f[1]) - 1100.0 * s).abs() < 1e-6);
+    // The balcony: an L of two legs, one run per axis (the two legs along
+    // x share one).
+    let out = write_drawings(&view("balustrade"), &Meta::default()).unwrap();
+    let arr = out.arrangement.expect("arrangement");
+    let runs: Vec<(&str, &str)> = arr
+        .dimensions
+        .iter()
+        .filter(|d| d.kind == "run")
+        .map(|d| (d.axis.as_str(), d.text.as_str()))
+        .collect();
+    assert_eq!(
+        runs,
+        [("x", "12× 107,31 (=1287,7)"), ("y", "24× 107,69 (=2584,6)")]
+    );
 }

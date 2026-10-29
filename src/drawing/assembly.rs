@@ -14,14 +14,40 @@ use super::text::{self, Lang};
 use super::Meta;
 use crate::dxf::blank::{Blank, P2};
 use crate::pdf::Doc;
+use crate::view::Solid;
 
-/// A placed blank: which row it belongs to and where the view puts it.
+/// What a placed part is drawn from: its flat blank folded (a bent
+/// sheet part), a flat plate's solid, or any other solid as it is (a
+/// bar, a tube, a part the view already shows folded).
+///
+/// A flat view places a sheet part by its neutral plane; placed and
+/// folded, the kernel puts the part's outer skin at its origin. The
+/// blank's [`Blank::skin_offset`] bridges the two, so the plates and the
+/// folded parts of a flat view sit where the folded view has them.
+pub enum Shape<'a> {
+    Blank { blank: &'a Blank, thickness: f64 },
+    Plate { solid: &'a Solid, blank: &'a Blank },
+    Solid(&'a Solid),
+}
+
+/// A placed part: which row it belongs to and where the view puts it.
 pub struct Instance<'a> {
     pub row: usize,
-    pub blank: &'a Blank,
-    pub thickness: f64,
+    pub shape: Shape<'a>,
     pub matrix: [P3; 3],
     pub position: P3,
+}
+
+impl Instance<'_> {
+    /// The part's own point in the world.
+    pub fn world(&self, q: P3) -> P3 {
+        let (m, t) = (self.matrix, self.position);
+        [
+            m[0][0] * q[0] + m[0][1] * q[1] + m[0][2] * q[2] + t[0],
+            m[1][0] * q[0] + m[1][1] * q[1] + m[1][2] * q[2] + t[1],
+            m[2][0] * q[0] + m[2][1] * q[1] + m[2][2] * q[2] + t[2],
+        ]
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -52,28 +78,49 @@ const BALLOON_R: f64 = 4.0;
 const RING: f64 = 11.0;
 const SPACING: f64 = 9.5;
 
-/// The scene of every instance, rendered; `None` when nothing folds or
-/// places.
-pub fn scene(instances: &[Instance]) -> Option<(Iso, Vec<usize>)> {
+/// The scene of every instance, with the row each object of it belongs
+/// to; `None` when nothing folds or places.
+pub fn scene(instances: &[Instance]) -> Option<(Scene, Vec<usize>)> {
     let mut sc = Scene::new();
     let mut owner_row = Vec::new();
     for inst in instances {
-        let (m, t) = (inst.matrix, inst.position);
-        let blank = inst.blank;
-        let world = move |p: P3| -> P3 {
-            let q = blank.to_solid(p);
-            [
-                m[0][0] * q[0] + m[0][1] * q[1] + m[0][2] * q[2] + t[0],
-                m[1][0] * q[0] + m[1][1] * q[1] + m[1][2] * q[2] + t[1],
-                m[2][0] * q[0] + m[2][1] * q[1] + m[2][2] * q[2] + t[2],
-            ]
+        let added = match inst.shape {
+            Shape::Blank { blank, thickness } => {
+                let world = |p: P3| inst.world(blank.to_solid_at(p, 0.0));
+                sc.add_blank(blank, thickness, &world)
+            }
+            Shape::Plate { solid, blank } => {
+                let o = blank.skin_offset();
+                let world = |p: P3| inst.world([p[0] - o[0], p[1] - o[1], p[2] - o[2]]);
+                sc.add_solid(solid, &world)
+            }
+            Shape::Solid(solid) => sc.add_solid(solid, &|p| inst.world(p)),
         };
-        if sc.add_blank(blank, inst.thickness, &world).is_some() {
+        if added.is_some() {
             owner_row.push(inst.row);
         }
     }
-    let iso = sc.render()?;
-    Some((iso, owner_row))
+    if sc.objects() == 0 {
+        return None;
+    }
+    Some((sc, owner_row))
+}
+
+/// The pictorial's lines on the sheet: outlines wide, tangent edges thin
+/// (ISO 128-2).
+pub fn draw_lines(c: &mut crate::pdf::Content, iso: &Iso, pm: &dyn Fn(P2) -> P2) {
+    for thin in [false, true] {
+        c.width(if thin { 0.18 } else { 0.35 });
+        for (k, pl) in iso.polylines.iter().enumerate() {
+            if iso.thin.get(k).copied().unwrap_or(false) != thin {
+                continue;
+            }
+            let pts: Vec<P2> = super::flat::thin(pl.iter().map(|q| pm(*q)).collect());
+            if pts.len() >= 2 {
+                c.polyline(&pts, false);
+            }
+        }
+    }
 }
 
 /// Points on a rectangle's perimeter by arc length from its lower-left
@@ -204,13 +251,7 @@ pub fn sheet(
         origin[0] + iso.bbox[2] * s,
         origin[1] + iso.bbox[3] * s,
     ];
-    c.width(0.35);
-    for pl in &iso.polylines {
-        let pts: Vec<P2> = super::flat::thin(pl.iter().map(|q| pm(*q)).collect());
-        if pts.len() >= 2 {
-            c.polyline(&pts, false);
-        }
-    }
+    draw_lines(&mut c, iso, &pm);
     // Scale under the caption, left.
     c.text([area[0] + 1.0, area[3] - 4.0], 3.5, 0.0, &scale_text);
 
