@@ -202,7 +202,7 @@ export type DrawingSheet = {
 
 /** One section of the dossier's front matter and where it is. */
 export type DrawingList = {
-  kind: "cover" | "assembly" | "bom" | "laser" | "bend";
+  kind: "cover" | "assembly" | "arrangement" | "bom" | "laser" | "bend";
   title: string;
   /** First page, 0-based, and how many pages. */
   page: number;
@@ -220,6 +220,34 @@ export type DrawingAssembly = {
   balloons: { pos: number; at: [number, number]; anchor: [number, number] }[];
 };
 
+/** One dimension of the general arrangement: the extents along an axis
+ * (`overall`) or the equal spaces between one position's parts (`run`,
+ * `count× pitch (=total)` from the first centre). */
+export type DrawingArrangementDimension = {
+  kind: "overall" | "run";
+  axis: "x" | "y" | "z";
+  view: "front" | "top" | "left";
+  text: string;
+  value: number;
+  pos?: number;
+  count?: number;
+  pitch?: number;
+  first?: number;
+};
+
+/** The general arrangement sheet (ISO 128-30, first angle): front, top
+ * and left side views with the overall sizes and the pitch runs. */
+export type DrawingArrangement = {
+  page: number;
+  paper: "A3";
+  scale: string;
+  scaleFactor: number;
+  /** `[x0, y0, z0, x1, y1, z1]` of the placed parts, mm. */
+  extents: [number, number, number, number, number, number];
+  views: { name: "front" | "top" | "left"; origin: [number, number]; bbox: [number, number, number, number] }[];
+  dimensions: DrawingArrangementDimension[];
+};
+
 export type DrawingsResult =
   | {
       ok: true;
@@ -227,10 +255,12 @@ export type DrawingsResult =
       pdf: string;
       /** The sheets in dossier order: positions follow the production route. */
       sheets: DrawingSheet[];
-      /** Cover, assembly and parts list, laser list, bend list. */
+      /** Cover, assembly and parts list, general arrangement, laser list, bend list. */
       lists: DrawingList[];
       /** `null` when no part folds or places. */
       assembly: DrawingAssembly | null;
+      /** `null` when fewer than two parts place. */
+      arrangement: DrawingArrangement | null;
       skipped: { id: string; message: string }[];
       /** The PDF as bytes, for a Blob or a file. */
       pdfBytes: () => Uint8Array;

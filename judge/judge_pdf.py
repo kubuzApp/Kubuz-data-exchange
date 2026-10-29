@@ -94,6 +94,12 @@ SIZE_BASE = 25_000
 SIZE_PER_PAGE = 6_000
 
 
+def dxf_name(part_id):
+    """The DXF file name view2dxf gives a part: anything but letters,
+    digits, `-` and `_` becomes `_`."""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in part_id) + ".dxf"
+
+
 def mm_text(v):
     """A length as the drawing writes it: a tenth, decimal comma, no
     trailing zero."""
@@ -1521,7 +1527,7 @@ def list_problems(doc, report, dxf_dir, prob):
         by_kind.setdefault(l["kind"], []).append(l)
     texts_of = {}
     for l in lists:
-        want = "A3" if l["kind"] == "assembly" else "A4"
+        want = "A3" if l["kind"] in ("assembly", "arrangement") else "A4"
         for k in range(l["pages"]):
             idx = l["page"] + k
             if idx >= doc.page_count:
@@ -1579,7 +1585,7 @@ def list_problems(doc, report, dxf_dir, prob):
                 prob(f"assembly: balloon {b['pos']} not drawn at ({at[0]:.1f}, {at[1]:.1f})")
         seen = {b["pos"] for b in asm["balloons"]}
         for s in report["sheets"]:
-            if s.get("kind") == "flat" and s["index"] not in seen:
+            if s["index"] not in seen:
                 prob(f"assembly: no balloon for pos {s['index']} ({s['title']})")
     # The laser list.
     laser = words_on(("laser",))
@@ -1588,7 +1594,7 @@ def list_problems(doc, report, dxf_dir, prob):
         if s.get("kind") != "flat":
             continue
         try:
-            d = read_dxf(os.path.join(dxf_dir, s["partIds"][0] + ".dxf"))
+            d = read_dxf(os.path.join(dxf_dir, dxf_name(s["partIds"][0])))
         except OSError:
             continue
         tag = f"laser list ({s['title']})"
@@ -1619,6 +1625,282 @@ def list_problems(doc, report, dxf_dir, prob):
             prob(f"bend list missing for {s['title']}")
 
 
+# --- The general arrangement ------------------------------------------------
+
+
+def part_rows(part):
+    """The part's rotation as rows (R = Rx · Ry · Rz when there is no
+    matrix), as the view reader does."""
+    m = part.get("matrix")
+    if m:
+        return m
+    x, y, z = [math.radians(v) for v in part.get("rotation", [0, 0, 0])]
+    rx = [[1, 0, 0], [0, math.cos(x), -math.sin(x)], [0, math.sin(x), math.cos(x)]]
+    ry = [[math.cos(y), 0, math.sin(y)], [0, 1, 0], [-math.sin(y), 0, math.cos(y)]]
+    rz = [[math.cos(z), -math.sin(z), 0], [math.sin(z), math.cos(z), 0], [0, 0, 1]]
+
+    def mul(a, b):
+        return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+    return mul(mul(rx, ry), rz)
+
+
+def de_boor(degree, cp, knots, mults, s):
+    """A B-spline point at fraction `s` of its range (de Boor)."""
+    u = []
+    for k, m in zip(knots, mults):
+        u.extend([k] * m)
+    p, n = degree, len(cp)
+    if len(u) < n + p + 1:
+        t = s * (n - 1)
+        i = min(int(t), n - 1)
+        j = min(i + 1, n - 1)
+        f = t - i
+        return tuple(cp[i][c] * (1 - f) + cp[j][c] * f for c in range(3))
+    lo, hi = u[p], u[n]
+    t = lo + (hi - lo) * min(max(s, 0.0), 1.0)
+    k = p
+    while k + 1 < n and t >= u[k + 1]:
+        k += 1
+    d = [tuple(cp[j + k - p]) for j in range(p + 1)]
+    for r in range(1, p + 1):
+        for j in range(p, r - 1, -1):
+            i = j + k - p
+            den = u[i + p - r + 1] - u[i]
+            a = 0.0 if abs(den) < 1e-15 else (t - u[i]) / den
+            d[j] = tuple(d[j - 1][c] * (1 - a) + d[j][c] * a for c in range(3))
+    return d[p]
+
+
+def solid_points(solid):
+    """Points on the solid's edges: every vertex, every circle edge and
+    every B-spline edge sampled finely (what its extents come from)."""
+    pts = [tuple(v) for v in solid.get("vertices", [])]
+    for e in solid.get("edges", []):
+        c = solid["curves"][e["curve"]]
+        a, b = solid["vertices"][e["start"]], solid["vertices"][e["end"]]
+        if c["kind"] == "circle":
+            ax = unit(c["axis"])
+            o, r = c["center"], c["radius"]
+            va = (a[0] - o[0], a[1] - o[1], a[2] - o[2])
+            rad = tuple(va[i] - ax[i] * dot(va, ax) for i in range(3))
+            if math.sqrt(dot(rad, rad)) < 1e-9:
+                e1 = unit(cross(ax, (1, 0, 0) if abs(ax[0]) < 0.9 else (0, 1, 0)))
+            else:
+                e1 = unit(rad)
+            e2 = cross(ax, e1)
+            vb = (b[0] - o[0], b[1] - o[1], b[2] - o[2])
+            sweep = math.atan2(dot(vb, e2), dot(vb, e1))
+            if e["start"] == e["end"] or (abs(sweep) < 1e-9 and math.dist(a, b) < 1e-6):
+                sweep = math.tau
+            elif sweep <= 0:
+                sweep += math.tau
+            n = max(8, int(sweep / math.radians(1.0)))
+            for i in range(n + 1):
+                t = sweep * i / n
+                pts.append(tuple(o[k] + r * (e1[k] * math.cos(t) + e2[k] * math.sin(t)) for k in range(3)))
+        elif c["kind"] == "bspline":
+            for i in range(0, 65):
+                pts.append(de_boor(c["degree"], c["controlPoints"], c["knots"], c["multiplicities"], i / 64))
+    if solid.get("mesh"):
+        pts.extend(tuple(v) for v in solid["mesh"]["vertices"])
+    return pts
+
+
+def skin_shift(solid):
+    """A sheet part (its outer skin one plane) is placed by that plane: a
+    flat view has the neutral plane at the origin, the folded view the
+    outer skin. The shift that puts the outer skin at the origin (zero
+    for a folded part, a bar or a tube)."""
+    normal = None
+    d = 0.0
+    for f in solid.get("faces", []):
+        if f.get("role") != "outerSkin":
+            continue
+        surf = solid["surfaces"][f["surface"]]
+        if surf["kind"] != "plane":
+            return (0.0, 0.0, 0.0)
+        n = unit(surf["normal"])
+        if normal is None:
+            normal, d = n, dot(surf["origin"], n)
+        elif dot(normal, n) < 0.9999:
+            return (0.0, 0.0, 0.0)
+    if normal is None:
+        return (0.0, 0.0, 0.0)
+    return (-normal[0] * d, -normal[1] * d, -normal[2] * d)
+
+
+def placed_points(view, part):
+    """The part's edge points in the world, its outer skin at its origin."""
+    solid = next(s for s in view["solids"] if s["id"] == part["solid"])
+    m = part_rows(part)
+    t = part.get("position", [0, 0, 0])
+    sh = skin_shift(solid)
+    return [
+        tuple(m[i][0] * (p[0] + sh[0]) + m[i][1] * (p[1] + sh[1]) + m[i][2] * (p[2] + sh[2]) + t[i] for i in range(3))
+        for p in solid_points(solid)
+    ]
+
+
+def bounds_of(pts):
+    return [min(p[i] for p in pts) for i in range(3)] + [max(p[i] for p in pts) for i in range(3)]
+
+
+def view_for_arrangement(name, view, views_root):
+    """The view whose placed parts the arrangement shows: the folded twin
+    of a flat view when it has the same parts, else the view itself when
+    none of its solids is a flat pattern with bends."""
+    if name.endswith("_flat") or "_flat_" in name:
+        base = name.replace("_flat", "", 1)
+        path = os.path.join(views_root or "", base + ".view.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                twin = json.load(f)
+            if {p["id"] for p in twin.get("parts", [])} == {p["id"] for p in view.get("parts", [])}:
+                return twin
+        if any(s.get("bends") for s in view["solids"]):
+            return None
+    return view
+
+
+def arrangement_problems(doc, report, view, prob):
+    """The general arrangement sheet against the placed parts: the
+    extents and the three views' sizes, every overall value, and every
+    run of equally spaced parts rebuilt from its printed values."""
+    arr = report.get("arrangement")
+    sheets = report["sheets"]
+    placed = sum(len(s["partIds"]) for s in sheets)
+    if not arr:
+        if report.get("assembly") and placed >= 2:
+            prob("arrangement: no sheet although the assembly has a picture and two or more parts")
+        return
+    if arr["page"] >= doc.page_count:
+        prob("arrangement: page missing")
+        return
+    tag = f"page {arr['page'] + 1} (arrangement)"
+    lst = [l for l in report.get("lists", []) if l["kind"] == "arrangement"]
+    if not lst or lst[0]["page"] != arr["page"]:
+        prob(f"{tag}: not listed as the arrangement")
+    page = doc[arr["page"]]
+    texts = page_texts(page)
+    words = {t for t, *_ in texts}
+    for d in arr["dimensions"]:
+        if d["text"] not in words:
+            prob(f"{tag}: claimed {d['text']!r} is not printed")
+    for names in (("Vooraanzicht", "Front view", "Vue de face"), ("Bovenaanzicht", "Top view", "Vue de dessus"), ("Zijaanzicht van links", "Left side view", "Vue de gauche")):
+        if not any(n in words for n in names):
+            prob(f"{tag}: view name {names[0]!r} missing")
+    s = arr["scaleFactor"]
+    views = {v["name"]: v for v in arr["views"]}
+    for want in ("front", "top", "left"):
+        if want not in views:
+            prob(f"{tag}: no {want} view")
+            return
+    f, t, l = views["front"]["bbox"], views["top"]["bbox"], views["left"]["bbox"]
+    # First angle: the top view under the front view, the left view right
+    # of it, sharing the axes.
+    if t[3] >= f[1] or abs(t[0] - f[0]) > 0.3 or abs(t[2] - f[2]) > 0.3:
+        prob(f"{tag}: top view is not under the front view")
+    if l[0] <= f[2] or abs(l[1] - f[1]) > 0.3 or abs(l[3] - f[3]) > 0.3:
+        prob(f"{tag}: left view is not right of the front view")
+    if view is None:
+        # A flat view with bent parts and no folded twin of the same
+        # parts: nothing to judge the sizes against.
+        return
+    parts = view.get("parts") or [{"id": so["id"], "solid": so["id"]} for so in view["solids"]]
+    by_id = {}
+    for p in parts:
+        try:
+            by_id[p["id"]] = bounds_of(placed_points(view, p))
+        except (StopIteration, KeyError):
+            prob(f"{tag}: part {p['id']} has no solid")
+    drawn = [pid for sh in sheets for pid in sh["partIds"] if pid in by_id]
+    if not drawn:
+        return
+    ext = [min(by_id[p][i] for p in drawn) for i in range(3)] + [max(by_id[p][i + 3] for p in drawn) for i in range(3)]
+    for i in range(6):
+        if abs(arr["extents"][i] - ext[i]) > 0.5:
+            prob(f"{tag}: extents {arr['extents']} are not the parts' {[round(v, 2) for v in ext]}")
+            break
+    span = [ext[3] - ext[0], ext[4] - ext[1], ext[5] - ext[2]]
+    for bx, w, h, name in ((f, span[0], span[2], "front"), (t, span[0], span[1], "top"), (l, span[1], span[2], "left")):
+        if abs((bx[2] - bx[0]) - w * s) > 0.6 or abs((bx[3] - bx[1]) - h * s) > 0.6:
+            prob(f"{tag}: {name} view is {bx[2] - bx[0]:.1f} × {bx[3] - bx[1]:.1f} mm, the parts {w * s:.1f} × {h * s:.1f}")
+    # Overall values.
+    overall = {d["axis"]: d for d in arr["dimensions"] if d["kind"] == "overall"}
+    for i, axis in enumerate("xyz"):
+        d = overall.get(axis)
+        if not d:
+            prob(f"{tag}: no overall {axis} dimension")
+            continue
+        if abs(d["value"] - span[i]) > 0.5 or d["text"] != mm_text(d["value"]):
+            prob(f"{tag}: overall {axis} {d['text']!r} is not {mm_text(span[i])!r}")
+    # Runs: every line of three or more equally spaced parts of one
+    # position has its run, and every run rebuilds such a line.
+    runs = [d for d in arr["dimensions"] if d["kind"] == "run"]
+    for d in runs:
+        if d["text"] != run_text(d["count"], d["pitch"], d["count"] * d["pitch"]) and d["text"] != run_text(d["count"], d["pitch"], d["value"]):
+            prob(f"{tag}: run {d['text']!r} is not written as count× pitch (=total)")
+        parsed = parse_run(d["text"])
+        if not parsed or abs(parsed[0] * parsed[1] - parsed[2]) > 0.005 * parsed[0] + 1e-6:
+            prob(f"{tag}: run {d['text']!r} does not add up")
+    used = set()
+    for sh in sheets:
+        ids = [pid for pid in sh["partIds"] if pid in by_id]
+        if len(ids) < 3:
+            continue
+        centres = {pid: [(by_id[pid][i] + by_id[pid][i + 3]) / 2 for i in range(3)] for pid in ids}
+        taken = set()
+        for axis in range(3):
+            others = [(axis + 1) % 3, (axis + 2) % 3]
+            lines = []
+            for pid in ids:
+                if pid in taken:
+                    continue
+                c = centres[pid]
+                for ln in lines:
+                    c0 = centres[ln[0]]
+                    if all(abs(c[o] - c0[o]) <= 0.6 for o in others):
+                        ln.append(pid)
+                        break
+                else:
+                    lines.append([pid])
+            for ln in lines:
+                if len(ln) < 3:
+                    continue
+                along = sorted(centres[pid][axis] for pid in ln)
+                pitch = (along[-1] - along[0]) / (len(along) - 1)
+                if pitch < 1.0 or any(abs(b - a - pitch) > 0.1 for a, b in zip(along, along[1:])):
+                    continue
+                taken.update(ln)
+                k = len(along) - 1
+                hit = None
+                for j, d in enumerate(runs):
+                    if d["axis"] == "xyz"[axis] and d["pos"] == sh["index"] and d["count"] == k and abs(d["first"] - along[0]) <= 0.6 and abs(d["pitch"] - pitch) <= 0.1:
+                        hit = j
+                        break
+                if hit is None:
+                    prob(f"{tag}: pos {sh['index']}: {len(ln)} parts at {mm_text(pitch)} along {'xyz'[axis]} from {mm_text(along[0])} have no run")
+                    continue
+                used.add(hit)
+                d = runs[hit]
+                parsed = parse_run(d["text"])
+                # Rebuilt from the printed values alone.
+                for i, c in enumerate(along):
+                    want = d["first"] + i * parsed[1]
+                    if abs(want - c) > 0.6 + 0.005 * i:
+                        prob(f"{tag}: run {d['text']!r}: centre {i + 1} rebuilt at {want:.2f} is not {c:.2f}")
+                        break
+                # The chain to the edges.
+                lo, hi = ext[axis], ext[axis + 3]
+                for v in (along[0] - lo, hi - along[-1]):
+                    if mm_text(v) not in words:
+                        prob(f"{tag}: run {d['text']!r}: edge distance {mm_text(v)!r} not printed")
+    for j, d in enumerate(runs):
+        if j not in used:
+            prob(f"{tag}: run {d['text']!r} (pos {d['pos']}) matches no line of parts")
+
+
 def judge(path, dxf_root, jar, views_root=None):
     out = {"file": path, "ok": True, "problems": []}
     prob = out["problems"].append
@@ -1645,6 +1927,15 @@ def judge(path, dxf_root, jar, views_root=None):
     for p in link_problems(path, report):
         prob(p)
     list_problems(doc, report, dxf_dir, prob)
+    own_view_path = os.path.join(views_root or "", name + ".view.json")
+    try:
+        with open(own_view_path, encoding="utf-8") as f:
+            own_view = json.load(f)
+    except OSError as e:
+        own_view = None
+        prob(f"arrangement: view: {e}")
+    if own_view is not None:
+        arrangement_problems(doc, report, view_for_arrangement(name, own_view, views_root), prob)
     if jar:
         v = verapdf(jar, path)
         if v:
@@ -1686,7 +1977,7 @@ def judge(path, dxf_root, jar, views_root=None):
             continue
 
         # Claims and must-haves against the DXF and the folded part.
-        dxf_path = os.path.join(dxf_dir, sheet["partIds"][0] + ".dxf")
+        dxf_path = os.path.join(dxf_dir, dxf_name(sheet["partIds"][0]))
         try:
             d = read_dxf(dxf_path)
         except OSError as e:

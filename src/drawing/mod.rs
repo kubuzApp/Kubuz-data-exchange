@@ -19,6 +19,7 @@ use crate::dxf::{blank, Skipped};
 use crate::pdf::{Doc, DocInfo};
 use crate::view::{Pose, View, P3};
 
+pub mod arrangement;
 pub mod assembly;
 pub mod dims;
 pub mod features;
@@ -101,11 +102,14 @@ pub struct DrawingsExport {
     /// list, with their pages.
     pub lists: Vec<ListReport>,
     pub assembly: Option<assembly::AssemblyReport>,
+    /// The general arrangement: three views with the overall sizes and
+    /// the pitch runs.
+    pub arrangement: Option<arrangement::ArrangementReport>,
 }
 
 impl DrawingsExport {
     /// `{ "ok": true, "pdf": "<base64>", "sheets": [...], "lists": [...],
-    /// "assembly": {...}, "skipped": [...] }`.
+    /// "assembly": {...}, "arrangement": {...}, "skipped": [...] }`.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "ok": true,
@@ -113,6 +117,7 @@ impl DrawingsExport {
             "sheets": self.sheets,
             "lists": self.lists,
             "assembly": self.assembly,
+            "arrangement": self.arrangement,
             "skipped": self.skipped.iter().map(|s| serde_json::json!({
                 "id": s.id, "message": s.message,
             })).collect::<Vec<_>>(),
@@ -124,7 +129,7 @@ impl DrawingsExport {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListReport {
-    /// `cover`, `assembly`, `bom`, `laser` or `bend`.
+    /// `cover`, `assembly`, `arrangement`, `bom`, `laser` or `bend`.
     pub kind: String,
     pub title: String,
     /// First page, 0-based, and how many pages.
@@ -374,23 +379,40 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         rows.push(row);
     }
 
-    // The assembly picture, when the parts fold and place.
+    // The assembly picture: every part placed as the view places it, a
+    // sheet part folded from its blank, anything else as its solid.
     let mut instances = Vec::new();
     for (k, &gi) in order.iter().enumerate() {
         let g = &groups[gi];
-        if let Some(b) = &g.blank {
-            for (m, p) in &g.placed {
-                instances.push(assembly::Instance {
-                    row: k,
-                    blank: b,
-                    thickness: g.thickness,
-                    matrix: *m,
-                    position: *p,
-                });
-            }
+        for (m, p) in &g.placed {
+            instances.push(assembly::Instance {
+                row: k,
+                // A plate without bends is its solid, thickness and
+                // holes included; a bent part is its blank folded.
+                shape: match &g.blank {
+                    Some(b) if !b.bends.is_empty() => assembly::Shape::Blank {
+                        blank: b,
+                        thickness: g.thickness,
+                    },
+                    Some(b) => assembly::Shape::Plate {
+                        solid: &view.solids[g.solid],
+                        blank: b,
+                    },
+                    None => assembly::Shape::Solid(&view.solids[g.solid]),
+                },
+                matrix: *m,
+                position: *p,
+            });
         }
     }
     let scene = assembly::scene(&instances);
+    let iso = scene
+        .as_ref()
+        .and_then(|(sc, owner)| sc.render(iso::Dir::Iso).map(|iso| (iso, owner)));
+    let arrangement_plan = scene
+        .as_ref()
+        .filter(|_| iso.is_some())
+        .and_then(|(sc, owner)| arrangement::plan(sc, owner, &rows));
 
     // Page plan: cover, assembly (+ parts list overflow), laser list,
     // bend list, then the sheets.
@@ -408,7 +430,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         let (_, area) = lists::begin(sheet::Paper::A4, lang, "", "", &bom_notes);
         lists::Table::capacity(area[3] - area[1])
     };
-    let bom_ranges = if scene.is_some() {
+    let bom_ranges = if iso.is_some() {
         bom.split(a3_cap, a4_cap)
     } else {
         bom.split(a4_cap, a4_cap)
@@ -427,7 +449,9 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     };
     let cover_page = 0;
     let assembly_page = 1;
-    let laser_page = assembly_page + bom_ranges.len();
+    let arrangement_page = assembly_page + bom_ranges.len();
+    let arrangement_pages = usize::from(arrangement_plan.is_some());
+    let laser_page = arrangement_page + arrangement_pages;
     let bend_page = laser_page + laser_pages;
     let first_sheet = bend_page + bend_pages;
     let pages = first_sheet + groups.len();
@@ -497,7 +521,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         pages: 1,
     });
     let mut assembly_report = None;
-    match &scene {
+    match &iso {
         Some((iso, owner_row)) => {
             let r = assembly::sheet(
                 &mut doc,
@@ -558,6 +582,16 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
             });
         }
     }
+    let arrangement_report = arrangement_plan.as_ref().map(|plan| {
+        let r = arrangement::sheet(&mut doc, arrangement_page, pages, meta, lang, plan);
+        lists_report.push(ListReport {
+            kind: "arrangement".into(),
+            title: lang.t("arrangement_title").into(),
+            page: arrangement_page,
+            pages: 1,
+        });
+        r
+    });
     if has_cut {
         lists::table_pages(
             &mut doc,
@@ -633,6 +667,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         skipped,
         lists: lists_report,
         assembly: assembly_report,
+        arrangement: arrangement_report,
     })
 }
 

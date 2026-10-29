@@ -1827,14 +1827,14 @@ pub fn terminators(c: &mut Content, a: P2, b: P2) -> f64 {
 /// part), with extension lines, terminators and the value written above
 /// the line in reading direction. Returns the text box.
 pub fn linear(c: &mut Content, p: P2, q: P2, v: P2, off: f64, text: &str) -> [f64; 4] {
-    let d = [q[0] - p[0], q[1] - p[1]];
-    let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
-    let n = [d[0] / l, d[1] / l];
     // The dimension line through the point `off` away from the farther of
-    // p and q along v.
+    // p and q along v; the text runs along it (p and q need not be level).
     let far = dot(p, v).max(dot(q, v)) + off;
     let a = add(p, v, far - dot(p, v));
     let b = add(q, v, far - dot(q, v));
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
+    let n = [d[0] / l, d[1] / l];
     c.line(add(p, v, GAP), add(a, v, EXT));
     c.line(add(q, v, GAP), add(b, v, EXT));
     c.line(a, b);
