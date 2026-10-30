@@ -100,10 +100,81 @@ struct Facet {
 /// as an affine function of the picture point, and its bounds.
 struct Flat {
     zone: usize,
-    poly: Vec<P2>,
-    holes: Vec<Vec<P2>>,
+    poly: Ring,
+    holes: Vec<Ring>,
     plane: [f64; 3],
     bbox: [f64; 4],
+}
+
+/// A projected outline or hole, ready for many point-in-polygon tests: a
+/// point outside its bounds is never inside, and a long outline (a
+/// grating floor's, a slotted plate's) keeps its edges in horizontal
+/// bands so a test walks only the edges at the point's height. The
+/// answer is the same as `inside` on the points.
+struct Ring {
+    pts: Vec<P2>,
+    bbox: [f64; 4],
+    /// Edge indices per band of height `band`, from `bbox[1]`; empty for
+    /// a short ring.
+    bands: Vec<Vec<u32>>,
+    band: f64,
+}
+
+/// Rings with more edges than this get bands.
+const BAND_EDGES: usize = 48;
+
+impl Ring {
+    fn new(pts: Vec<P2>) -> Ring {
+        let bbox = bbox_of(&pts);
+        let n = pts.len();
+        let mut ring = Ring {
+            pts,
+            bbox,
+            bands: Vec::new(),
+            band: 0.0,
+        };
+        if n > BAND_EDGES {
+            let count = (n / 8).clamp(4, 256);
+            ring.band = ((bbox[3] - bbox[1]) / count as f64).max(1e-9);
+            ring.bands = vec![Vec::new(); count];
+            for i in 0..n {
+                let (a, b) = (ring.pts[i], ring.pts[(i + 1) % n]);
+                let (lo, hi) = (ring.band_of(a[1].min(b[1])), ring.band_of(a[1].max(b[1])));
+                for band in &mut ring.bands[lo..=hi] {
+                    band.push(i as u32);
+                }
+            }
+        }
+        ring
+    }
+
+    fn band_of(&self, y: f64) -> usize {
+        let k = ((y - self.bbox[1]) / self.band).floor().max(0.0) as usize;
+        k.min(self.bands.len() - 1)
+    }
+
+    fn contains(&self, p: P2) -> bool {
+        if !in_box(&self.bbox, p) {
+            return false;
+        }
+        if self.bands.is_empty() {
+            return inside(&self.pts, p);
+        }
+        // An edge crosses the point's height only when its low end is at
+        // or under it and its high end above, so it is in this band.
+        let n = self.pts.len();
+        let mut hit = false;
+        for &i in &self.bands[self.band_of(p[1])] {
+            let (a, b) = (self.pts[i as usize], self.pts[(i as usize + 1) % n]);
+            if (a[1] > p[1]) != (b[1] > p[1]) {
+                let x = a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+                if x > p[0] {
+                    hit = !hit;
+                }
+            }
+        }
+        hit
+    }
 }
 
 /// A line of the scene: the zones it lies on (never hidden by their
@@ -164,6 +235,12 @@ fn grow(b: &mut [f64; 6], p: P3) {
         b[i] = b[i].min(p[i]);
         b[i + 3] = b[i + 3].max(p[i]);
     }
+}
+
+/// `p` within `b`, edges included: outside it `inside` is false for any
+/// polygon `b` bounds.
+fn in_box(b: &[f64; 4], p: P2) -> bool {
+    p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
 }
 
 fn inside(poly: &[P2], p: P2) -> bool {
@@ -257,6 +334,71 @@ fn densify(poly: &[P2], step: f64, closed: bool) -> Vec<P2> {
         out.push(poly[n - 1]);
     }
     out
+}
+
+/// The projected facets bucketed by picture area, so the visibility test
+/// of a point looks only at the facets whose bounds can cover it (a
+/// 200-part staircase has tens of thousands of facets).
+struct Grid {
+    origin: P2,
+    cell: P2,
+    n: [usize; 2],
+    cells: Vec<Vec<u32>>,
+}
+
+impl Grid {
+    fn new(flats: &[Flat]) -> Grid {
+        let mut b = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for f in flats {
+            b[0] = b[0].min(f.bbox[0]);
+            b[1] = b[1].min(f.bbox[1]);
+            b[2] = b[2].max(f.bbox[2]);
+            b[3] = b[3].max(f.bbox[3]);
+        }
+        // About as many cells as facets, at most 256 a side.
+        let side = ((flats.len() as f64).sqrt().ceil() as usize).clamp(1, 256);
+        let n = [side, side];
+        let cell = [
+            ((b[2] - b[0]) / side as f64).max(1e-9),
+            ((b[3] - b[1]) / side as f64).max(1e-9),
+        ];
+        let mut g = Grid {
+            origin: [b[0], b[1]],
+            cell,
+            n,
+            cells: vec![Vec::new(); side * side],
+        };
+        for (i, f) in flats.iter().enumerate() {
+            let (x0, y0) = g.index([f.bbox[0], f.bbox[1]]);
+            let (x1, y1) = g.index([f.bbox[2], f.bbox[3]]);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    g.cells[y * g.n[0] + x].push(i as u32);
+                }
+            }
+        }
+        g
+    }
+
+    fn index(&self, p: P2) -> (usize, usize) {
+        let ix = ((p[0] - self.origin[0]) / self.cell[0]).floor();
+        let iy = ((p[1] - self.origin[1]) / self.cell[1]).floor();
+        (
+            (ix.max(0.0) as usize).min(self.n[0] - 1),
+            (iy.max(0.0) as usize).min(self.n[1] - 1),
+        )
+    }
+
+    /// The facets whose bounds may hold `p`.
+    fn at(&self, p: P2) -> &[u32] {
+        let (x, y) = self.index(p);
+        &self.cells[y * self.n[0] + x]
+    }
 }
 
 /// Chord slices of a cylinder or a bend, in degrees.
@@ -800,12 +942,12 @@ impl Scene {
                 let holes = fc
                     .holes
                     .iter()
-                    .map(|h| h.iter().map(|p| dir.project(*p).0).collect())
+                    .map(|h| Ring::new(h.iter().map(|p| dir.project(*p).0).collect()))
                     .collect();
                 Some(Flat {
                     zone: fc.zone,
                     bbox: bbox_of(&poly),
-                    poly,
+                    poly: Ring::new(poly),
                     holes,
                     plane,
                 })
@@ -817,6 +959,7 @@ impl Scene {
         let ext = self.extents();
         let span = (0..3).map(|i| ext[i + 3] - ext[i]).fold(0.0, f64::max);
         let step = (span / 400.0).clamp(2.0, 20.0);
+        let grid = Grid::new(&flats);
         let hidden = |a3: P3, b3: P3, zones: [usize; 2]| -> bool {
             let mid3 = [
                 (a3[0] + b3[0]) / 2.0,
@@ -824,7 +967,8 @@ impl Scene {
                 (a3[2] + b3[2]) / 2.0,
             ];
             let (pm, dm) = dir.project(mid3);
-            flats.iter().any(|fc| {
+            grid.at(pm).iter().any(|&f| {
+                let fc = &flats[f as usize];
                 fc.zone != zones[0]
                     && fc.zone != zones[1]
                     && pm[0] > fc.bbox[0]
@@ -832,8 +976,8 @@ impl Scene {
                     && pm[1] > fc.bbox[1]
                     && pm[1] < fc.bbox[3]
                     && fc.plane[0] * pm[0] + fc.plane[1] * pm[1] + fc.plane[2] > dm + 0.05
-                    && inside(&fc.poly, pm)
-                    && !fc.holes.iter().any(|h| inside(h, pm))
+                    && fc.poly.contains(pm)
+                    && !fc.holes.iter().any(|h| h.contains(pm))
             })
         };
         let mut polylines: Vec<Vec<P2>> = Vec::new();
@@ -960,4 +1104,79 @@ pub fn isometric(blank: &Blank, t: f64) -> Option<Iso> {
 
 fn dot2(a: P2, b: P2) -> f64 {
     a[0] * b[0] + a[1] * b[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ring answers as `inside` on its points, banded or not: on
+    /// random points, on vertices and on edge heights.
+    #[test]
+    fn a_ring_contains_what_inside_says() {
+        let mut seed = 7u64;
+        let mut rnd = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for n in [3usize, 12, 47, 49, 200, 1000] {
+            // A star: radius varies, so many edges share heights.
+            let pts: Vec<P2> = (0..n)
+                .map(|i| {
+                    let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                    let r = 20.0 + 15.0 * rnd();
+                    [r * a.cos(), (r * a.sin() * 4.0).round() / 4.0]
+                })
+                .collect();
+            let ring = Ring::new(pts.clone());
+            assert_eq!(ring.bands.is_empty(), n <= BAND_EDGES);
+            let mut probes: Vec<P2> = (0..4000)
+                .map(|_| [rnd() * 80.0 - 40.0, (rnd() * 320.0 - 160.0).round() / 4.0])
+                .collect();
+            probes.extend(pts.iter().copied());
+            for p in probes {
+                assert_eq!(ring.contains(p), inside(&pts, p), "n {n} at {p:?}");
+            }
+        }
+    }
+
+    /// The grid hands every facet whose bounds hold a point to the test.
+    #[test]
+    fn the_grid_finds_every_facet_over_a_point() {
+        let flat = |x0: f64, y0: f64, w: f64, h: f64| {
+            let poly = vec![[x0, y0], [x0 + w, y0], [x0 + w, y0 + h], [x0, y0 + h]];
+            Flat {
+                zone: 0,
+                bbox: bbox_of(&poly),
+                poly: Ring::new(poly),
+                holes: Vec::new(),
+                plane: [0.0; 3],
+            }
+        };
+        let flats: Vec<Flat> = (0..60)
+            .map(|i| {
+                let f = i as f64;
+                flat(
+                    f * 7.0 % 90.0,
+                    f * 13.0 % 70.0,
+                    3.0 + f % 40.0,
+                    2.0 + f % 25.0,
+                )
+            })
+            .collect();
+        let grid = Grid::new(&flats);
+        for i in 0..120 {
+            for j in 0..100 {
+                let p = [i as f64 - 5.0 + 0.37, j as f64 - 5.0 + 0.61];
+                let near = grid.at(p);
+                for (k, f) in flats.iter().enumerate() {
+                    if in_box(&f.bbox, p) {
+                        assert!(near.contains(&(k as u32)), "facet {k} at {p:?}");
+                    }
+                }
+            }
+        }
+    }
 }
