@@ -73,6 +73,11 @@ impl Content {
         self.raw(&format!("{} g", fmt_frac(g)));
     }
 
+    /// Stroke grey level 0..1 (0 = black).
+    pub fn stroke_gray(&mut self, g: f64) {
+        self.raw(&format!("{} G", fmt_frac(g)));
+    }
+
     pub fn fill_rgb(&mut self, rgb: [f64; 3]) {
         self.raw(&format!(
             "{} {} {} rg",

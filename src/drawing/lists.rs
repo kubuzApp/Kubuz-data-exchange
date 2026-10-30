@@ -47,6 +47,12 @@ pub struct BendRow {
 pub struct Row {
     pub pos: usize,
     pub id: String,
+    /// What the lists and the sheet call it: the part's name in the
+    /// dossier's language, else its id.
+    pub name: String,
+    /// The group (sub-assembly) it belongs to, an index into the export's
+    /// groups.
+    pub group: usize,
     pub part_ids: Vec<String>,
     pub material: String,
     pub thickness: f64,
@@ -420,7 +426,7 @@ pub fn bom_table(rows: &[Row], lang: Lang) -> Table {
             Some(w) => total_w += w * q as f64,
             None => all_weighed = false,
         }
-        let mut name = r.id.clone();
+        let mut name = r.name.clone();
         if let Some(m) = r.mirror_of {
             name.push_str(&format!(
                 " ({})",
@@ -512,7 +518,7 @@ pub fn laser_table(rows: &[Row], lang: Lang) -> Table {
                 cells: vec![
                     r.pos.to_string(),
                     q.to_string(),
-                    r.id.clone(),
+                    r.name.clone(),
                     r.blank.map(lw).unwrap_or_default(),
                     text::mm(cl),
                     holes.to_string(),
@@ -634,7 +640,11 @@ pub fn bend_table(rows: &[Row], lang: Lang) -> Table {
                         } else {
                             String::new()
                         },
-                        if k == 0 { r.id.clone() } else { String::new() },
+                        if k == 0 {
+                            r.name.clone()
+                        } else {
+                            String::new()
+                        },
                         b.nr.to_string(),
                         text::deg(b.angle_deg),
                         dir.to_string(),
@@ -788,7 +798,7 @@ pub fn cover(doc: &mut Doc, page: usize, pages: usize, meta: &Meta, lang: Lang, 
     let listed = info.rows.len() <= room.saturating_sub(table.rows.len() + 1);
     if listed {
         for r in info.rows {
-            let mut name = format!("    {} {} · {}", lang.t("pos"), r.pos, r.id);
+            let mut name = format!("    {} {} · {}", lang.t("pos"), r.pos, r.name);
             if r.quantity() > 1 {
                 name.push_str(&format!(" ({}×)", r.quantity()));
             }

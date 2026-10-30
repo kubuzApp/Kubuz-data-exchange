@@ -202,14 +202,21 @@ export type DrawingSheet = {
 
 /** One section of the dossier's front matter and where it is. */
 export type DrawingList = {
-  kind: "cover" | "assembly" | "arrangement" | "bom" | "laser" | "bend";
+  kind: "cover" | "assembly" | "subassembly" | "arrangement" | "bom" | "laser" | "bend";
   title: string;
   /** First page, 0-based, and how many pages. */
   page: number;
   pages: number;
 };
 
-/** The assembly sheet: the isometric of every placed part with item balloons. */
+export type DrawingBalloon = { pos: number; at: [number, number]; anchor: [number, number] };
+
+/** An assembly sheet: the isometric of the placed parts with item
+ * balloons. A complex assembly (two or more groups and more positions
+ * than one picture holds) gets an overview that names the groups
+ * (`callouts`, each linking to its group's sheet) and a sheet per group
+ * (`group`), which shows the assembly as far as it is built when that
+ * group goes on. Parts too small at the sheet's scale get a detail view. */
 export type DrawingAssembly = {
   page: number;
   paper: "A3";
@@ -217,14 +224,33 @@ export type DrawingAssembly = {
   scaleFactor: number;
   origin: [number, number];
   bbox: [number, number, number, number];
-  balloons: { pos: number; at: [number, number]; anchor: [number, number] }[];
+  balloons: DrawingBalloon[];
+  /** The group key of a group sheet; `null` on the overview. */
+  group: string | null;
+  callouts: { group: string; text: string; at: [number, number]; anchor: [number, number]; page: number }[];
+  detail: {
+    letter: string;
+    scale: string;
+    scaleFactor: number;
+    /** The circle on the main picture, sheet mm. */
+    centre: [number, number];
+    radius: number;
+    origin: [number, number];
+    /** The enlarged circle on the sheet. */
+    at: [number, number];
+    atRadius: number;
+    balloons: DrawingBalloon[];
+  } | null;
 };
 
 /** One dimension of the general arrangement: the extents along an axis
- * (`overall`) or the equal spaces between one position's parts (`run`,
- * `count× pitch (=total)` from the first centre). */
+ * (`overall`), the equal spaces between one position's parts (`run`,
+ * `count× pitch (=total)` from the first centre), from one upright centre
+ * to the next (`bay`, `first` = the left centre) or a bay's floor or level
+ * to its next level (`level`, `first` = where it starts, `pitch` = the
+ * bay's left upright centre). */
 export type DrawingArrangementDimension = {
-  kind: "overall" | "run";
+  kind: "overall" | "run" | "bay" | "level";
   axis: "x" | "y" | "z";
   view: "front" | "top" | "left";
   text: string;
@@ -257,8 +283,10 @@ export type DrawingsResult =
       sheets: DrawingSheet[];
       /** Cover, assembly and parts list, general arrangement, laser list, bend list. */
       lists: DrawingList[];
-      /** `null` when no part folds or places. */
+      /** The overview; `null` when no part folds or places. */
       assembly: DrawingAssembly | null;
+      /** Every assembly sheet: the overview first, then one per group when split. */
+      assemblies: DrawingAssembly[];
       /** `null` when fewer than two parts place. */
       arrangement: DrawingArrangement | null;
       skipped: { id: string; message: string }[];

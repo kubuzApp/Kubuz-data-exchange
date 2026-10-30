@@ -3,10 +3,14 @@
 //! the left (right of the front view), with the overall length, width
 //! and height and, for every position whose parts stand at one pitch
 //! along an axis, the run `n× p (=total)` from the first to the last
-//! centre, chained to the edges (ISO 129-1).
+//! centre, chained to the edges (ISO 129-1). A cabinet or a rack
+//! (uprights dividing the front into bays) gets the upright centres
+//! chained above the front view and each bay's levels chained from the
+//! floor inside the bay, in place of the height runs.
 
 use serde::Serialize;
 
+use super::bays::{self, Bays};
 use super::dims::{self, D};
 use super::iso::{Dir, Iso, Scene};
 use super::lists::{self, Row};
@@ -31,8 +35,11 @@ pub struct ViewReport {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DimReport {
-    /// `overall` (the extents along the axis) or `run` (equal spaces
-    /// between the centres of one position's parts).
+    /// `overall` (the extents along the axis), `run` (equal spaces
+    /// between the centres of one position's parts), `bay` (from one
+    /// upright centre to the next) or `level` (a bay's floor or level to
+    /// its next level; `first` is where it starts, `pitch` the bay's
+    /// left upright centre).
     pub kind: String,
     /// `x`, `y` or `z`.
     pub axis: String,
@@ -86,6 +93,7 @@ pub struct Plan {
     left: Iso,
     ext: [f64; 6],
     runs: Vec<Run>,
+    bays: Option<Bays>,
 }
 
 const GAP: f64 = 12.0;
@@ -203,12 +211,19 @@ pub fn plan(scene: &Scene, owner_row: &[usize], rows: &[Row]) -> Option<Plan> {
     let front = scene.render(Dir::Front)?;
     let top = scene.render(Dir::Top)?;
     let left = scene.render(Dir::Left)?;
+    let bays = bays::find(scene);
+    let mut runs = runs(scene, owner_row, rows);
+    if bays.is_some() {
+        // The levels chains say the heights bay by bay.
+        runs.retain(|r| r.axis != 2);
+    }
     Some(Plan {
         front,
         top,
         left,
         ext: scene.extents(),
-        runs: runs(scene, owner_row, rows),
+        runs,
+        bays,
     })
 }
 
@@ -294,10 +309,11 @@ pub fn sheet(
     // front view, the z runs and the height left of it, the length under
     // the top view, the y runs and the width under the left view.
     // A run row's text reaches dims::H + 1,5 above its line.
+    let nb = if plan.bays.is_some() { 1.0 } else { 0.0 };
     let above = LABEL_H
         + 2.5
-        + if nx > 0.0 {
-            nx * ROW + 2.0 + 2.0 * (dims::H + 1.5) + 1.0
+        + if nx + nb > 0.0 {
+            (nx + nb) * ROW + 2.0 + 2.0 * (dims::H + 1.5) + 1.0
         } else {
             0.0
         };
@@ -334,7 +350,16 @@ pub fn sheet(
             .fold(0.0, f64::max)
     };
     let gap_h = GAP.max(reach(1, true)).max(reach(0, false));
-    let gap_v = GAP.max(reach(2, true) + LABEL_H + 2.5);
+    // A bay's first level, from the floor, is often too short for its
+    // value, which then stands under the floor line.
+    let floor_w = plan
+        .bays
+        .iter()
+        .flat_map(|b| &b.bays)
+        .filter_map(|b| b.levels.first())
+        .map(|z| font::width(&text::mm(z - ext[2]), dims::H) + dims::ARROW_L + 3.0)
+        .fold(0.0, f64::max);
+    let gap_v = GAP.max(reach(2, true).max(floor_w) + LABEL_H + 2.5);
     let fits = |s: f64| {
         let w = left_of + lx * s + gap_h + ly * s + 4.0;
         let h = above + lz * s + (gap_v + ly * s + below_top).max(below_left) + 1.0;
@@ -379,7 +404,13 @@ pub fn sheet(
             Dir::Top => &plan.top,
             _ => &plan.left,
         };
-        super::assembly::draw_lines(&mut c, iso, &|q| [o[0] + q[0] * s, o[1] + q[1] * s]);
+        super::assembly::draw_lines(
+            &mut c,
+            iso,
+            &|q| [o[0] + q[0] * s, o[1] + q[1] * s],
+            &|_| true,
+            None,
+        );
         views.push(ViewReport {
             name: dir.name().into(),
             origin: *o,
@@ -527,6 +558,58 @@ pub fn sheet(
             pitch: Some(r.pitch),
             first: Some(r.first),
         });
+    }
+
+    if let Some(b) = &plan.bays {
+        // The upright centres, chained above the runs.
+        let pieces: Vec<(P2, P2, String)> = b
+            .centres
+            .windows(2)
+            .map(|w| (fp(w[0], b.top), fp(w[1], b.top), text::mm(w[1] - w[0])))
+            .collect();
+        chain(&mut c, &pieces, [0.0, 1.0], fy1 + (nx + 1.0) * ROW + 2.0);
+        for w in b.centres.windows(2) {
+            dimensions.push(DimReport {
+                kind: "bay".into(),
+                axis: "x".into(),
+                view: "front".into(),
+                text: text::mm(w[1] - w[0]),
+                value: w[1] - w[0],
+                pos: None,
+                count: None,
+                pitch: None,
+                first: Some(w[0]),
+            });
+        }
+        // Each bay's levels from the floor, inside the bay near its left
+        // upright, the extension lines along the levels themselves.
+        for bay in &b.bays {
+            if bay.levels.is_empty() {
+                continue;
+            }
+            let room = (bay.inner[1] - bay.inner[0]) * s;
+            let off = (0.25 * room).max(dims::H + 3.0).min(room / 2.0);
+            let line = fp(bay.inner[0], 0.0)[0] + off;
+            let mut from = ext[2];
+            let mut pieces = Vec::new();
+            for &z in &bay.levels {
+                let t = text::mm(z - from);
+                pieces.push((fp(bay.inner[0], from), fp(bay.inner[0], z), t.clone()));
+                dimensions.push(DimReport {
+                    kind: "level".into(),
+                    axis: "z".into(),
+                    view: "front".into(),
+                    text: t,
+                    value: z - from,
+                    pos: None,
+                    count: None,
+                    pitch: Some(bay.x0),
+                    first: Some(from),
+                });
+                from = z;
+            }
+            chain(&mut c, &pieces, [1.0, 0.0], line);
+        }
     }
 
     lists::finish(

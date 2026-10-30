@@ -183,6 +183,18 @@ const LABELS: &[(&str, [&str; 3])] = &[
     ("cover", ["VOORBLAD", "COVER SHEET", "PAGE DE GARDE"]),
     ("cover_title", ["Voorblad", "Cover sheet", "Page de garde"]),
     ("assembly", ["SAMENSTELLING", "ASSEMBLY", "ENSEMBLE"]),
+    ("sub_assembly", ["DEELSAMENSTELLING", "SUB-ASSEMBLY", "SOUS-ENSEMBLE"]),
+    ("sub_assembly_title", ["Deelsamenstelling", "Sub-assembly", "Sous-ensemble"]),
+    ("detail_view", ["DETAIL", "DETAIL", "DÉTAIL"]),
+    ("callout_sheet", ["blad {}", "sheet {}", "feuille {}"]),
+    (
+        "overview_note",
+        [
+            "Positienummers op de deelsamenstellingen; elke naam linkt naar zijn blad.",
+            "Item numbers on the sub-assembly sheets; every name links to its sheet.",
+            "Repères sur les sous-ensembles ; chaque nom renvoie à sa feuille.",
+        ],
+    ),
     ("assembly_title", ["Samenstelling en stuklijst", "Assembly and parts list", "Ensemble et nomenclature"]),
     ("bom", ["STUKLIJST", "PARTS LIST", "NOMENCLATURE"]),
     ("arrangement", ["SAMENSTELLINGSTEKENING", "GENERAL ARRANGEMENT", "PLAN D'ENSEMBLE"]),

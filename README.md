@@ -224,12 +224,30 @@ then the **assembly sheet** on A3: every part placed as the view places it
 as one isometric with hidden lines removed, tangent edges thin, and an
 item balloon (ISO 6433) per position, with the **parts list** (ISO 7573)
 beside it: position, quantity, description, material, thickness, flat size,
-folded size and weight. A dossier of two or more parts then gets the
+folded size and weight. A part's name in the parts list and on its sheet
+comes from the view (`name`, per language). A complex assembly (two or
+more groups, `group` and `groupName` on the parts, and more positions than
+one picture holds) is split: the assembly sheet becomes an overview that
+names each group on a reference line linking to the group's sheet, the
+parts list moves to A4 pages behind it, and every group gets an A3 sheet
+with its own parts list and balloons. A group sheet shows the assembly as
+far as it is built when that group goes on (the earlier groups thin and
+grey, the later ones left off), so the parts they would hide (back walls,
+rails under the shelves) show. The balloons stand in columns beside the
+picture and rows above and below it, each on the side nearest its part,
+and swap places until no two leaders cross. Parts too small to point at
+on the sheet's scale (caps, bolts, nuts) get a detail view (ISO 128-30):
+a lettered circle on the picture, enlarged beside it at an ISO 5455 scale,
+with their balloons around it. A dossier of two or more parts then gets the
 **general arrangement** on A3 (ISO 128-30, first angle: front view, top
 view under it, left side view right of it) with the overall length, width
 and height and, for every position whose parts stand at one pitch along an
 axis (the bars of a balustrade), the run `37× 107,84 (=3990)` from the
-first centre to the last, chained to the edges (ISO 129-1). A flat view
+first centre to the last, chained to the edges (ISO 129-1). A cabinet or
+a rack (uprights dividing the front into bays, each bay holding levels)
+gets the upright centres chained above the front view and each bay's
+levels chained from the floor inside the bay, in place of the height
+runs. A flat view
 places a sheet part by its neutral plane; the dossier puts every part's
 outer skin at its origin, where the kernel has it once folded, so the
 placed parts sit as the folded view has them. Then the **laser list** per material and thickness (flat
@@ -251,12 +269,15 @@ with its cut and the pieces it shows, the folded extents, where the
 isometric sits, and, for a folded sheet, each view's frame and origin in
 part coordinates, so an outside judge can rebuild the part from the drawing
 alone, plus its page, route, weight, cut length, net area and hole count.
-`lists` says where the cover, the assembly, the general arrangement, the
-parts list, the laser list and the bend list are, `assembly` where the
-isometric sits and where every balloon points, and `arrangement` the
-placed parts' extents, each view's origin and bounds on the sheet, and
-every dimension (the overall values and the runs with their position,
-count, pitch and first centre). Parts that cannot be drawn (a mesh, a
+`lists` says where the cover, the assembly, the group sheets, the general
+arrangement, the parts list, the laser list and the bend list are,
+`assembly` where the isometric sits and where every balloon points,
+`assemblies` the same for every assembly sheet (with each overview
+callout and its target page, and each detail view's circle, scale and
+balloons), and `arrangement` the placed parts' extents, each view's
+origin and bounds on the sheet, and every dimension (the overall values,
+the runs with their position, count, pitch and first centre, the bays and
+the levels). Parts that cannot be drawn (a mesh, a
 mirrored folded part) are listed under `skipped`.
 
 From the command line:
@@ -387,7 +408,10 @@ fixture, no two texts overlap (measured with the embedded font's advances),
 no line runs through a text, the file stays under 25 KB plus 6 KB a page,
 and veraPDF passes it as PDF/A-2b. The front matter is judged the same
 way: the parts list prints every sheet's position, quantity, sizes and
-weight, every balloon is drawn where the report says, the laser list's cut
+weight, every balloon (on every assembly sheet and detail view) is drawn
+where the report says, every position has one somewhere, no two leaders
+of one picture cross, every overview callout is printed and points at a
+group sheet, every detail has its letter and its scale, the laser list's cut
 lengths and hole counts are what the judge sums and counts from the DXF,
 the bend list carries every bend's angle, radius and DXF line length, and
 every link annotation points at a page, every sheet back at the parts list
@@ -397,7 +421,9 @@ itself with every sheet part's outer skin at its origin): the extents and
 the three views' sizes, the overall values, every line of three or more
 equally spaced parts of one position has its run, every run rebuilds its
 centres from the printed count, pitch and first centre, and the chain to
-the edges is printed. A folded sheet
+the edges is printed; every bay runs from one full-height part's centre
+to the next, and every level from the floor or a lower level to a placed
+part's top face. A folded sheet
 is judged against the view it was drawn from (`--views`): every ordinate
 is, in its view's frame, a vertex, a hole centre, a circle's extreme, a
 cylinder's silhouette or the corner of two edge-on faces; every chain runs

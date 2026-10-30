@@ -72,6 +72,9 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
                 position: [0.0; 3],
                 rotation: [0.0; 3],
                 matrix: None,
+                name: None,
+                group: None,
+                group_name: None,
             })
             .collect()
     } else {
