@@ -269,3 +269,111 @@ fn the_balustrade_places_every_bar_and_dimensions_their_pitch() {
         [("x", "12× 107,31 (=1287,7)"), ("y", "24× 107,69 (=2584,6)")]
     );
 }
+
+#[test]
+fn the_frame_cabinet_gets_a_sheet_per_group_and_every_position_a_balloon() {
+    // A cabinet of 251 parts in four groups (frame, caps, boards, bolts):
+    // too many positions for one picture, so the overview names the
+    // groups, each group gets its own sheet, the parts list goes to A4,
+    // and the caps and bolts, too small at the sheet's scale, get a
+    // detail view.
+    let out = write_drawings(&view("frame_cabinet"), &Meta::default()).unwrap();
+    let kinds: Vec<&str> = out.lists.iter().map(|l| l.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "cover",
+            "assembly",
+            "bom",
+            "subassembly",
+            "subassembly",
+            "subassembly",
+            "subassembly",
+            "arrangement",
+            "laser"
+        ]
+    );
+    let titles: Vec<&str> = out.sheets.iter().map(|s| s.title.as_str()).collect();
+    for want in ["Staander", "Plank", "Buisdop", "Moer"] {
+        assert!(titles.contains(&want), "{titles:?}");
+    }
+    let overview = &out.assemblies[0];
+    assert!(overview.balloons.is_empty());
+    let groups: Vec<usize> = out
+        .lists
+        .iter()
+        .filter(|l| l.kind == "subassembly")
+        .map(|l| l.page)
+        .collect();
+    assert_eq!(overview.callouts.len(), 4);
+    for co in &overview.callouts {
+        assert!(groups.contains(&co.page), "{co:?}");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for asm in &out.assemblies {
+        let mut pictures = vec![&asm.balloons];
+        if let Some(d) = &asm.detail {
+            pictures.push(&d.balloons);
+        }
+        for balloons in pictures {
+            for (i, a) in balloons.iter().enumerate() {
+                seen.insert(a.pos);
+                for b in &balloons[i + 1..] {
+                    assert!(
+                        !crosses(a.at, a.anchor, b.at, b.anchor),
+                        "page {}: leaders {} and {} cross",
+                        asm.page,
+                        a.pos,
+                        b.pos
+                    );
+                }
+            }
+        }
+    }
+    let all: std::collections::BTreeSet<usize> = out.sheets.iter().map(|s| s.index).collect();
+    assert_eq!(seen, all);
+    let detail_of = |g: &str| {
+        out.assemblies
+            .iter()
+            .find(|a| a.group.as_deref() == Some(g))
+            .and_then(|a| a.detail.as_ref())
+            .map(|d| d.balloons.len())
+    };
+    assert_eq!(detail_of("caps"), Some(1));
+    assert_eq!(detail_of("bolts"), Some(2));
+    // The arrangement: the upright centres chained above the front view,
+    // each bay's levels from the floor.
+    let arr = out.arrangement.expect("arrangement");
+    let of = |kind: &str| -> Vec<&str> {
+        arr.dimensions
+            .iter()
+            .filter(|d| d.kind == kind)
+            .map(|d| d.text.as_str())
+            .collect()
+    };
+    assert_eq!(of("bay"), ["620", "1020", "620"]);
+    let first_bay = arr
+        .dimensions
+        .iter()
+        .find(|d| d.kind == "bay")
+        .and_then(|d| d.first);
+    let left: Vec<&str> = arr
+        .dimensions
+        .iter()
+        .filter(|d| d.kind == "level" && d.pitch == first_bay)
+        .map(|d| d.text.as_str())
+        .collect();
+    assert_eq!(left, ["67", "440", "370", "370", "370"]);
+    assert!(of("run").iter().all(|t| !t.is_empty()));
+    assert!(!arr
+        .dimensions
+        .iter()
+        .any(|d| d.kind == "run" && d.axis == "z"));
+}
+
+fn crosses(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+    let o = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| {
+        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    };
+    o(a, b, c) * o(a, b, d) < -1e-9 && o(c, d, a) * o(c, d, b) < -1e-9
+}

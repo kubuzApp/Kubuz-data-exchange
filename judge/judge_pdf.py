@@ -1480,6 +1480,13 @@ def dxf_hole_count(d):
     return len(d["circles"]) + max(chains - 1, 0)
 
 
+def segments_cross(a, b, c, d):
+    """Whether segments ab and cd cross (touching ends do not count)."""
+    def o(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    return o(a, b, c) * o(a, b, d) < -1e-9 and o(c, d, a) * o(c, d, b) < -1e-9
+
+
 def link_problems(path, report):
     """Every Link annotation is printable and points at a page; every
     sheet links to the parts list and every parts list row to its sheet."""
@@ -1527,7 +1534,7 @@ def list_problems(doc, report, dxf_dir, prob):
         by_kind.setdefault(l["kind"], []).append(l)
     texts_of = {}
     for l in lists:
-        want = "A3" if l["kind"] in ("assembly", "arrangement") else "A4"
+        want = "A3" if l["kind"] in ("assembly", "subassembly", "arrangement") else "A4"
         for k in range(l["pages"]):
             idx = l["page"] + k
             if idx >= doc.page_count:
@@ -1571,19 +1578,46 @@ def list_problems(doc, report, dxf_dir, prob):
                     prob(f"{tag}: folded size {want!r} not printed")
             if s.get("weight") is not None and kg_text(s["weight"]) not in bom:
                 prob(f"{tag}: weight {kg_text(s['weight'])!r} not printed")
-    # Balloons.
-    asm = report.get("assembly")
-    if asm:
-        texts = texts_of.get(asm["page"], [])
-        for b in asm["balloons"]:
-            at = b["at"]
-            hit = any(
-                t == str(b["pos"]) and abs((box[0] + box[2]) / 2 - at[0]) < 3.0 and abs((box[1] + box[3]) / 2 - at[1]) < 3.0
-                for t, box, *_ in texts
-            )
-            if not hit:
-                prob(f"assembly: balloon {b['pos']} not drawn at ({at[0]:.1f}, {at[1]:.1f})")
-        seen = {b["pos"] for b in asm["balloons"]}
+    # Balloons, on the assembly sheet and on every group sheet and detail
+    # view: each drawn where the report says, no two leaders of one
+    # picture crossing, and every position balloned somewhere.
+    sheets_asm = report.get("assemblies") or ([report["assembly"]] if report.get("assembly") else [])
+    if sheets_asm:
+        seen = set()
+        for asm in sheets_asm:
+            texts = texts_of.get(asm["page"])
+            if texts is None:
+                texts = page_texts(doc[asm["page"]])
+            tag = f"page {asm['page'] + 1} (assembly)"
+            pictures = [asm["balloons"]]
+            if asm.get("detail"):
+                pictures.append(asm["detail"]["balloons"])
+                letter = asm["detail"]["letter"]
+                if sum(1 for t, *_ in texts if t == letter) < 1:
+                    prob(f"{tag}: detail {letter} has no letter on the picture")
+                if not any(letter in t and asm["detail"]["scale"] in t for t, *_ in texts):
+                    prob(f"{tag}: detail {letter} has no caption with its scale")
+            for balloons in pictures:
+                for b in balloons:
+                    at = b["at"]
+                    hit = any(
+                        t == str(b["pos"])
+                        and abs((box[0] + box[2]) / 2 - at[0]) < 3.0
+                        and abs((box[1] + box[3]) / 2 - at[1]) < 3.0
+                        for t, box, *_ in texts
+                    )
+                    if not hit:
+                        prob(f"{tag}: balloon {b['pos']} not drawn at ({at[0]:.1f}, {at[1]:.1f})")
+                    seen.add(b["pos"])
+                for i, a in enumerate(balloons):
+                    for b in balloons[i + 1:]:
+                        if segments_cross(a["at"], a["anchor"], b["at"], b["anchor"]):
+                            prob(f"{tag}: the leaders of balloons {a['pos']} and {b['pos']} cross")
+            for co in asm.get("callouts", []):
+                if not any(t == co["text"] for t, *_ in texts):
+                    prob(f"{tag}: callout {co['text']!r} not printed")
+                if not any(l["page"] == co["page"] for l in lists if l["kind"] == "subassembly"):
+                    prob(f"{tag}: callout {co['text']!r} points at page {co['page'] + 1}, not a group sheet")
         for s in report["sheets"]:
             if s["index"] not in seen:
                 prob(f"assembly: no balloon for pos {s['index']} ({s['title']})")
@@ -1844,6 +1878,32 @@ def arrangement_problems(doc, report, view, prob):
         parsed = parse_run(d["text"])
         if not parsed or abs(parsed[0] * parsed[1] - parsed[2]) > 0.005 * parsed[0] + 1e-6:
             prob(f"{tag}: run {d['text']!r} does not add up")
+    # Bays and levels: every bay runs from one full-height part's centre
+    # to the next, and every level from the floor or a lower level to the
+    # top face of a placed part. With levels, they carry the heights and
+    # the height runs are not wanted.
+    bays = [d for d in arr["dimensions"] if d["kind"] == "bay"]
+    levels = [d for d in arr["dimensions"] if d["kind"] == "level"]
+    tall_x = [(by_id[p][0] + by_id[p][3]) / 2 for p in drawn if by_id[p][5] - by_id[p][2] >= 0.8 * span[2]]
+    tops = [by_id[p][5] for p in drawn]
+    for d in bays:
+        for x in (d["first"], d["first"] + d["value"]):
+            if not any(abs(x - c) <= 0.6 for c in tall_x):
+                prob(f"{tag}: bay {d['text']!r}: {x:.1f} is no upright's centre")
+        if d["text"] != mm_text(d["value"]):
+            prob(f"{tag}: bay {d['text']!r} is not {mm_text(d['value'])!r}")
+    for a, b in zip(bays, bays[1:]):
+        if abs(a["first"] + a["value"] - b["first"]) > 0.1:
+            prob(f"{tag}: bays {a['text']!r} and {b['text']!r} do not chain")
+    for d in levels:
+        z = d["first"] + d["value"]
+        if not any(abs(z - t) <= 0.6 for t in tops):
+            prob(f"{tag}: level {d['text']!r} ends at {z:.1f}, no part's top")
+        starts = [ext[2]] + [e["first"] + e["value"] for e in levels if e["pitch"] == d["pitch"]]
+        if not any(abs(d["first"] - z0) <= 0.1 for z0 in starts):
+            prob(f"{tag}: level {d['text']!r} starts at {d['first']:.1f}, not the floor or a level")
+        if d["text"] != mm_text(d["value"]):
+            prob(f"{tag}: level {d['text']!r} is not {mm_text(d['value'])!r}")
     used = set()
     for sh in sheets:
         ids = [pid for pid in sh["partIds"] if pid in by_id]
@@ -1873,6 +1933,8 @@ def arrangement_problems(doc, report, view, prob):
                 if pitch < 1.0 or any(abs(b - a - pitch) > 0.1 for a, b in zip(along, along[1:])):
                     continue
                 taken.update(ln)
+                if axis == 2 and levels:
+                    continue
                 k = len(along) - 1
                 hit = None
                 for j, d in enumerate(runs):

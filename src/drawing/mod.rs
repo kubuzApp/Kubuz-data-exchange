@@ -21,6 +21,8 @@ use crate::view::{Pose, View, P3};
 
 pub mod arrangement;
 pub mod assembly;
+pub mod balloons;
+pub mod bays;
 pub mod dims;
 pub mod features;
 pub mod flat;
@@ -102,6 +104,9 @@ pub struct DrawingsExport {
     /// list, with their pages.
     pub lists: Vec<ListReport>,
     pub assembly: Option<assembly::AssemblyReport>,
+    /// Every assembly sheet: the overview first, then a sheet per group
+    /// when the assembly is split.
+    pub assemblies: Vec<assembly::AssemblyReport>,
     /// The general arrangement: three views with the overall sizes and
     /// the pitch runs.
     pub arrangement: Option<arrangement::ArrangementReport>,
@@ -117,6 +122,7 @@ impl DrawingsExport {
             "sheets": self.sheets,
             "lists": self.lists,
             "assembly": self.assembly,
+            "assemblies": self.assemblies,
             "arrangement": self.arrangement,
             "skipped": self.skipped.iter().map(|s| serde_json::json!({
                 "id": s.id, "message": s.message,
@@ -124,6 +130,10 @@ impl DrawingsExport {
         })
     }
 }
+
+/// More positions than this on one picture and an assembly of several
+/// groups gets a sheet per group.
+const MAX_BALLOONS: usize = 14;
 
 /// One section of the dossier's front matter and where it is.
 #[derive(Clone, Debug, Serialize)]
@@ -163,6 +173,9 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     }
     struct PartRef {
         id: String,
+        name: String,
+        group: String,
+        group_name: String,
         solid: String,
         mirror: bool,
         scale: f64,
@@ -176,6 +189,9 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
             .iter()
             .map(|s| PartRef {
                 id: s.id.clone(),
+                name: s.id.clone(),
+                group: String::new(),
+                group_name: String::new(),
                 solid: s.id.clone(),
                 mirror: false,
                 scale: 1.0,
@@ -198,8 +214,13 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                     ))
                 }
             };
+            let group = p.group.clone().unwrap_or_default();
             v.push(PartRef {
                 id: p.id.clone(),
+                name: crate::view::name_in(&p.name, lang.code()).unwrap_or_else(|| p.id.clone()),
+                group_name: crate::view::name_in(&p.group_name, lang.code())
+                    .unwrap_or_else(|| group.clone()),
+                group,
                 solid: p.solid.clone(),
                 mirror,
                 scale,
@@ -215,6 +236,9 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     // Group the parts by blank, keeping the view's order.
     struct Group {
         part_ids: Vec<String>,
+        name: String,
+        /// Index into `assemblies`.
+        assembly: usize,
         blank: Option<blank::Blank>,
         solid: usize,
         mirror: bool,
@@ -225,10 +249,24 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         placed: Vec<([P3; 3], P3)>,
     }
     let mut groups: Vec<Group> = Vec::new();
-    let mut by_blank: HashMap<(String, bool, i64), usize> = HashMap::new();
+    // The sub-assemblies in the view's order: key and name.
+    let mut assemblies: Vec<(String, String)> = Vec::new();
+    let mut by_blank: HashMap<(String, String, bool, i64), usize> = HashMap::new();
     let mut skipped = Vec::new();
     for p in parts {
-        let key = (p.solid.clone(), p.mirror, (p.scale * 1e9).round() as i64);
+        let assembly = match assemblies.iter().position(|(k, _)| *k == p.group) {
+            Some(i) => i,
+            None => {
+                assemblies.push((p.group.clone(), p.group_name.clone()));
+                assemblies.len() - 1
+            }
+        };
+        let key = (
+            p.group.clone(),
+            p.solid.clone(),
+            p.mirror,
+            (p.scale * 1e9).round() as i64,
+        );
         if let Some(&i) = by_blank.get(&key) {
             groups[i].part_ids.push(p.id);
             groups[i].placed.push((p.matrix, p.position));
@@ -249,6 +287,8 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
             by_blank.insert(key, groups.len());
             groups.push(Group {
                 part_ids: vec![p.id],
+                name: p.name,
+                assembly,
                 blank: None,
                 solid: si,
                 mirror: false,
@@ -264,6 +304,8 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 by_blank.insert(key, groups.len());
                 groups.push(Group {
                     part_ids: vec![p.id],
+                    name: p.name,
+                    assembly,
                     blank: Some(b),
                     solid: si,
                     mirror: p.mirror,
@@ -340,6 +382,8 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         let mut row = lists::Row {
             pos: pos_of[gi],
             id: g.part_ids[0].clone(),
+            name: g.name.clone(),
+            group: g.assembly,
             part_ids: g.part_ids.clone(),
             material: g.material.clone(),
             thickness: g.thickness,
@@ -430,11 +474,6 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         let (_, area) = lists::begin(sheet::Paper::A4, lang, "", "", &bom_notes);
         lists::Table::capacity(area[3] - area[1])
     };
-    let bom_ranges = if iso.is_some() {
-        bom.split(a3_cap, a4_cap)
-    } else {
-        bom.split(a4_cap, a4_cap)
-    };
     let has_cut = rows.iter().any(|r| r.blank.is_some());
     let has_bends = rows.iter().any(|r| !r.bends.is_empty());
     let laser_pages = if has_cut {
@@ -449,7 +488,54 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     };
     let cover_page = 0;
     let assembly_page = 1;
-    let arrangement_page = assembly_page + bom_ranges.len();
+    // A complex assembly of several groups gets a sheet per group, each
+    // with its part of the parts list (in A3 pieces when long); the
+    // overview then names the groups instead of the positions.
+    let visible_rows: Vec<usize> = match &iso {
+        Some((iso, owner_row)) => {
+            let mut v: Vec<usize> = iso
+                .owner
+                .iter()
+                .filter_map(|&o| owner_row.get(o).copied())
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        }
+        None => Vec::new(),
+    };
+    let split = assemblies.len() >= 2 && visible_rows.len() > MAX_BALLOONS;
+    // (group, first row, end row) of each group sheet, rows in position
+    // order within the group.
+    let mut group_pages: Vec<(usize, Vec<usize>)> = Vec::new();
+    if split {
+        for g in 0..assemblies.len() {
+            let members: Vec<usize> = (0..rows.len()).filter(|&k| rows[k].group == g).collect();
+            if members.is_empty() {
+                continue;
+            }
+            // The table has a total row: keep one place for it.
+            let cap = a3_cap.saturating_sub(1).max(2);
+            for chunk in members.chunks(cap) {
+                group_pages.push((g, chunk.to_vec()));
+            }
+        }
+    }
+    // The parts list: on the assembly sheet with A4 overflow, or, when
+    // the overview only names the groups, wholly on A4 behind it.
+    let (overview_bom, bom_overflow) = if iso.is_none() || split {
+        (None, bom.split(a4_cap, a4_cap))
+    } else {
+        let mut r = bom.split(a3_cap, a4_cap);
+        let first = r.remove(0);
+        (Some(first), r)
+    };
+    let group_page = if iso.is_some() {
+        assembly_page + 1 + bom_overflow.len()
+    } else {
+        assembly_page + bom_overflow.len()
+    };
+    let arrangement_page = group_page + group_pages.len();
     let arrangement_pages = usize::from(arrangement_plan.is_some());
     let laser_page = arrangement_page + arrangement_pages;
     let bend_page = laser_page + laser_pages;
@@ -485,7 +571,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
             total: groups.len(),
             page: first_sheet + k,
             pages,
-            title: &g.part_ids[0],
+            title: &g.name,
             part_ids: &g.part_ids,
             material: &g.material,
             thickness: g.thickness,
@@ -521,8 +607,56 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         pages: 1,
     });
     let mut assembly_report = None;
+    let mut assembly_reports = Vec::new();
+    let row_group: Vec<usize> = rows.iter().map(|r| r.group).collect();
+    let group_name = |g: usize| {
+        let (key, name) = &assemblies[g];
+        if name.is_empty() {
+            key.clone()
+        } else {
+            name.clone()
+        }
+    };
     match &iso {
         Some((iso, owner_row)) => {
+            let callouts: Vec<(usize, String, usize)> = if split {
+                let mut v: Vec<(usize, String, usize)> = Vec::new();
+                for (k, (g, _)) in group_pages.iter().enumerate() {
+                    if v.iter().any(|(x, _, _)| x == g) {
+                        continue;
+                    }
+                    let sheet_no = lang
+                        .t("callout_sheet")
+                        .replace("{}", &(group_page + k + 1).to_string());
+                    v.push((
+                        *g,
+                        format!("{} · {}", group_name(*g), sheet_no),
+                        group_page + k,
+                    ));
+                }
+                v
+            } else {
+                Vec::new()
+            };
+            let overview = assembly::Page {
+                caption: lang.t("assembly").into(),
+                sub: if split {
+                    lang.t("overview_note").into()
+                } else {
+                    String::new()
+                },
+                description: lang.t("assembly_title").into(),
+                label: lang.t("assembly_title").into(),
+                focus: None,
+                marked: if split {
+                    Vec::new()
+                } else {
+                    visible_rows.clone()
+                },
+                callouts,
+                row_group: &row_group,
+                group_key: None,
+            };
             let r = assembly::sheet(
                 &mut doc,
                 assembly_page,
@@ -532,10 +666,82 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 &rows,
                 iso,
                 owner_row,
-                &bom,
-                bom_ranges[0].clone(),
+                overview_bom.clone().map(|r| (&bom, r)),
+                &overview,
             );
-            assembly_report = Some(r);
+            assembly_report = Some(r.clone());
+            assembly_reports.push(r);
+            // The group sheets.
+            // A group sheet shows the cabinet as far as it is built when
+            // that group goes on: the earlier groups as context, the
+            // later ones left off, so the parts they would hide (back
+            // walls, rails under the shelves) show and get their balloons.
+            let built: Vec<Option<(iso::Iso, Vec<usize>)>> = (0..assemblies.len())
+                .map(|g| {
+                    let sub: Vec<assembly::Instance> = instances
+                        .iter()
+                        .copied()
+                        .filter(|i| rows[i.row].group <= g)
+                        .collect();
+                    assembly::scene(&sub)
+                        .and_then(|(sc, owner)| sc.render(iso::Dir::Iso).map(|iso| (iso, owner)))
+                })
+                .collect();
+            for (k, (g, members)) in group_pages.iter().enumerate() {
+                let page = group_page + k;
+                let (iso, owner_row) = match &built[*g] {
+                    Some((i, o)) => (i, o.as_slice()),
+                    None => (iso, owner_row.as_slice()),
+                };
+                let seen: Vec<usize> = iso
+                    .owner
+                    .iter()
+                    .filter_map(|&o| owner_row.get(o).copied())
+                    .collect();
+                let sub_rows: Vec<lists::Row> = members.iter().map(|&i| rows[i].clone()).collect();
+                let table = lists::bom_table(&sub_rows, lang);
+                let chunks = group_pages.iter().filter(|(x, _)| x == g).count();
+                let nth = group_pages[..=k].iter().filter(|(x, _)| x == g).count();
+                let mut sub = group_name(*g);
+                if chunks > 1 {
+                    sub.push_str(&format!(" ({nth}/{chunks})"));
+                }
+                let pg = assembly::Page {
+                    caption: lang.t("sub_assembly").into(),
+                    sub: sub.clone(),
+                    description: format!("{} · {}", lang.t("sub_assembly_title"), sub),
+                    label: format!("{} · {}", lang.t("sub_assembly_title"), sub),
+                    focus: Some(*g),
+                    marked: members
+                        .iter()
+                        .copied()
+                        .filter(|m| seen.contains(m))
+                        .collect(),
+                    callouts: Vec::new(),
+                    row_group: &row_group,
+                    group_key: Some(assemblies[*g].0.clone()),
+                };
+                let n = table.rows.len();
+                let r = assembly::sheet(
+                    &mut doc,
+                    page,
+                    pages,
+                    meta,
+                    lang,
+                    &rows,
+                    iso,
+                    owner_row,
+                    Some((&table, 0..n)),
+                    &pg,
+                );
+                assembly_reports.push(r);
+                lists_report.push(ListReport {
+                    kind: "subassembly".into(),
+                    title: pg.label.clone(),
+                    page,
+                    pages: 1,
+                });
+            }
             lists_report.push(ListReport {
                 kind: "assembly".into(),
                 title: lang.t("assembly_title").into(),
@@ -543,9 +749,13 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 pages: 1,
             });
             // Overflow of the parts list on A4.
-            for (k, r) in bom_ranges.iter().enumerate().skip(1) {
-                let page = assembly_page + k;
-                let caption = format!("{} ({})", lang.t("bom"), lang.t("continued"));
+            for (k, r) in bom_overflow.iter().enumerate() {
+                let page = assembly_page + 1 + k;
+                let caption = if overview_bom.is_none() && k == 0 {
+                    lang.t("bom").to_string()
+                } else {
+                    format!("{} ({})", lang.t("bom"), lang.t("continued"))
+                };
                 let (mut c, area) = lists::begin(sheet::Paper::A4, lang, &caption, "", &bom_notes);
                 let x = area[0] + (area[2] - area[0] - bom.width()) / 2.0;
                 bom.draw(&mut c, &mut doc, page, x.max(area[0]), area[3], r.clone());
@@ -562,18 +772,18 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                     &format!("{} {}", lang.t("bom_title"), k + 1),
                 );
             }
-            if bom_ranges.len() > 1 {
+            if !bom_overflow.is_empty() {
                 lists_report.push(ListReport {
                     kind: "bom".into(),
                     title: lang.t("bom_title").into(),
                     page: assembly_page + 1,
-                    pages: bom_ranges.len() - 1,
+                    pages: bom_overflow.len(),
                 });
             }
         }
         None => {
             let n = assembly::bom_only(&mut doc, assembly_page, pages, meta, lang, &bom);
-            debug_assert_eq!(n, bom_ranges.len());
+            debug_assert_eq!(n, bom_overflow.len());
             lists_report.push(ListReport {
                 kind: "bom".into(),
                 title: lang.t("bom_title").into(),
@@ -630,6 +840,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
             pages: bend_pages,
         });
     }
+    lists_report.sort_by_key(|l| l.page);
     let mut sections: Vec<(String, usize, usize)> = lists_report
         .iter()
         .filter(|l| l.kind != "cover")
@@ -655,9 +866,9 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     for (k, s) in sheets.iter().enumerate() {
         let g = &groups[order[k]];
         let name = if g.part_ids.len() > 1 {
-            format!("{} · {} ({}×)", s.label, g.part_ids[0], g.part_ids.len())
+            format!("{} · {} ({}×)", s.label, g.name, g.part_ids.len())
         } else {
-            format!("{} · {}", s.label, g.part_ids[0])
+            format!("{} · {}", s.label, g.name)
         };
         doc.add_outline(&[lang.t("details")], &name, s.page);
     }
@@ -667,6 +878,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         skipped,
         lists: lists_report,
         assembly: assembly_report,
+        assemblies: assembly_reports,
         arrangement: arrangement_report,
     })
 }

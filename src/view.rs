@@ -193,6 +193,35 @@ pub struct Part {
     /// R row by row.
     #[serde(default)]
     pub matrix: Option<[P3; 3]>,
+    /// The part's name per language (`nl`, `en`, `fr`), for the parts list
+    /// and the sheet titles. The id is used when it is missing.
+    #[serde(default)]
+    pub name: Option<std::collections::HashMap<String, String>>,
+    /// The group (sub-assembly) the part belongs to: a complex assembly
+    /// gets a sheet per group.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// The group's name per language.
+    #[serde(default)]
+    pub group_name: Option<std::collections::HashMap<String, String>>,
+}
+
+/// The text for `lang` of a name per language: that language, else
+/// English, else any.
+pub fn name_in(
+    name: &Option<std::collections::HashMap<String, String>>,
+    lang: &str,
+) -> Option<String> {
+    let m = name.as_ref()?;
+    let pick = |k: &str| m.get(k).map(|s| s.trim()).filter(|s| !s.is_empty());
+    pick(lang)
+        .or_else(|| pick("en"))
+        .or_else(|| {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            keys.into_iter().find_map(|k| pick(k))
+        })
+        .map(str::to_string)
 }
 
 /// What a part's matrix is, once the rotation part is taken out.
