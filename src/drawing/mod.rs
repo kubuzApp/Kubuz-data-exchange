@@ -683,6 +683,11 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                         .copied()
                         .filter(|i| rows[i.row].group <= g)
                         .collect();
+                    // The last group completes the assembly: its picture
+                    // is the overview's, already drawn.
+                    if sub.len() == instances.len() {
+                        return None;
+                    }
                     assembly::scene(&sub)
                         .and_then(|(sc, owner)| sc.render(iso::Dir::Iso).map(|iso| (iso, owner)))
                 })

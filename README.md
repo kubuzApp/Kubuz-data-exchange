@@ -221,7 +221,9 @@ The dossier follows the material through the workshop. It opens with a
 material and thickness, and a table of contents whose rows are links),
 then the **assembly sheet** on A3: every part placed as the view places it
 (a bent part folded from its blank, a plate, a bar or a tube as its solid),
-as one isometric with hidden lines removed, tangent edges thin, and an
+as one isometric with hidden lines removed (the facets are indexed by
+picture area and long outlines by height, so a 200-part staircase draws
+in seconds), tangent edges thin, and an
 item balloon (ISO 6433) per position, with the **parts list** (ISO 7573)
 beside it: position, quantity, description, material, thickness, flat size,
 folded size and weight. A part's name in the parts list and on its sheet
