@@ -7,11 +7,37 @@ one sheet per blank. More formats come as the CPQ needs them.
 
 The kernel knows sheet metal: it turns a programme into exact faces (planes,
 cylinders, ruled spline strips) and edges (lines, circles, cubic splines),
-with shared vertices and each part's pose. That is the view. This repo knows
-file syntax: it maps the view one to one onto STEP entities and writes the
-parts as an assembly tree. Neither side knows the other's job, and nothing
-runs on a server. It is one small Rust crate, also built as WebAssembly for
-the browser.
+with shared vertices and each part's pose. That is the view. This repo makes
+**files and technical drawings from the exact view**: it never models a part
+itself, it reads what the kernel wrote. Nothing runs on a server; it is one
+Rust crate, also built as WebAssembly for the browser.
+
+The file writers are the small part. STEP (`src/step/`) maps the view one
+to one onto AP214 entities and writes the parts as an assembly tree; DXF
+(`src/dxf/`) writes each flat blank's outline, holes and bend lines. Most
+of the crate (about 17,000 of its 21,000 lines, tests left out) is the
+drawing dossier in `src/drawing/`, which does real drafting work on the
+view:
+
+- **projection and hidden lines**: orthographic views with hidden edges
+  found per face (`project.rs`) and the isometric and assembly pictures
+  of placed parts (`iso.rs`);
+- **sections** through the folded part from the blank and its bends
+  (`section.rs`);
+- **dimensioning** per ISO 129-1: chain dimensions on the flat pattern
+  (`dims.rs`, `features.rs`), running dimensions on the folded views
+  (`running.rs`), hole fields, pitch circles and slots (`pattern.rs`);
+- **assembly sheets** with item balloons that do not cross, group sheets
+  and detail views (`assembly.rs`, `balloons.rs`), and the general
+  arrangement with pitch runs, bays and levels (`arrangement.rs`,
+  `bays.rs`);
+- **lists**: cover, parts list, laser list and bend list (`lists.rs`);
+- **the sheet** itself: ISO 5457 frame, title block, text and logo
+  (`sheet.rs`, `text.rs`, `logo.rs`), written as PDF/A (`src/pdf/`).
+
+The view carries no drafting rules; the drawing modules hold them. So the
+line between the two repos is: the kernel decides what the part is, this
+repo decides how it is written down and drawn.
 
 ## Use it
 
