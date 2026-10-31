@@ -71,6 +71,11 @@ pub struct ArrangementReport {
     pub extents: [f64; 6],
     pub views: Vec<ViewReport>,
     pub dimensions: Vec<DimReport>,
+    /// Where the bays and levels come from: `view` (the parts'
+    /// `arrangement`) or `guessed` (the parts' proportions); missing
+    /// when the sheet has no bays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bays: Option<String>,
 }
 
 /// A run of one position's parts at one pitch along an axis.
@@ -94,6 +99,8 @@ pub struct Plan {
     ext: [f64; 6],
     runs: Vec<Run>,
     bays: Option<Bays>,
+    /// What the export should say about the bays.
+    pub notes: Vec<super::Note>,
 }
 
 const GAP: f64 = 12.0;
@@ -203,15 +210,21 @@ fn runs(scene: &Scene, owner_row: &[usize], rows: &[Row]) -> Vec<Run> {
     kept
 }
 
-/// The views of a scene of two or more placed parts, or `None`.
-pub fn plan(scene: &Scene, owner_row: &[usize], rows: &[Row]) -> Option<Plan> {
+/// The views of a scene of two or more placed parts, or `None`. `tags`
+/// is each object's layout tag from the view.
+pub fn plan(
+    scene: &Scene,
+    owner_row: &[usize],
+    tags: &[Option<crate::view::Arrangement>],
+    rows: &[Row],
+) -> Option<Plan> {
     if scene.objects() < 2 {
         return None;
     }
     let front = scene.render(Dir::Front)?;
     let top = scene.render(Dir::Top)?;
     let left = scene.render(Dir::Left)?;
-    let bays = bays::find(scene);
+    let (bays, notes) = bays::find(scene, tags);
     let mut runs = runs(scene, owner_row, rows);
     if bays.is_some() {
         // The levels chains say the heights bay by bay.
@@ -224,6 +237,7 @@ pub fn plan(scene: &Scene, owner_row: &[usize], rows: &[Row]) -> Option<Plan> {
         ext: scene.extents(),
         runs,
         bays,
+        notes,
     })
 }
 
@@ -632,5 +646,6 @@ pub fn sheet(
         extents: ext,
         views,
         dimensions,
+        bays: plan.bays.as_ref().map(|b| b.source.name().to_string()),
     }
 }

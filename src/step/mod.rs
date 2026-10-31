@@ -75,6 +75,7 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
                 name: None,
                 group: None,
                 group_name: None,
+                arrangement: None,
             })
             .collect()
     } else {
