@@ -110,11 +110,29 @@ pub struct DrawingsExport {
     /// The general arrangement: three views with the overall sizes and
     /// the pitch runs.
     pub arrangement: Option<arrangement::ArrangementReport>,
+    /// What an app should show beside the dossier, such as a cabinet's
+    /// bays guessed from the parts' proportions (`bays-guessed`).
+    pub notes: Vec<Note>,
+}
+
+/// A remark on the dossier for the app to show: `code` is stable,
+/// `message` is English.
+///
+/// - `bays-guessed`: no part has an `arrangement`, the bays and levels
+///   on the general arrangement come from the parts' proportions;
+/// - `bays-incomplete`: parts have an `arrangement`, but fewer than two
+///   upright lines, so no bays are drawn;
+/// - `bays-out-of-range`: a level names a bay the uprights do not make.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Note {
+    pub code: String,
+    pub message: String,
 }
 
 impl DrawingsExport {
     /// `{ "ok": true, "pdf": "<base64>", "sheets": [...], "lists": [...],
-    /// "assembly": {...}, "arrangement": {...}, "skipped": [...] }`.
+    /// "assembly": {...}, "arrangement": {...}, "notes": [...],
+    /// "skipped": [...] }`.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "ok": true,
@@ -124,6 +142,7 @@ impl DrawingsExport {
             "assembly": self.assembly,
             "assemblies": self.assemblies,
             "arrangement": self.arrangement,
+            "notes": self.notes,
             "skipped": self.skipped.iter().map(|s| serde_json::json!({
                 "id": s.id, "message": s.message,
             })).collect::<Vec<_>>(),
@@ -183,6 +202,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         thickness: f64,
         matrix: [P3; 3],
         position: P3,
+        tag: Option<crate::view::Arrangement>,
     }
     let parts: Vec<PartRef> = if view.parts.is_empty() {
         view.solids
@@ -199,6 +219,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 thickness: 0.0,
                 matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                 position: [0.0; 3],
+                tag: None,
             })
             .collect()
     } else {
@@ -228,6 +249,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 thickness: p.thickness * scale,
                 matrix: p.rows(),
                 position: p.position,
+                tag: p.arrangement,
             });
         }
         v
@@ -245,8 +267,8 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         scale: f64,
         material: String,
         thickness: f64,
-        /// Instances: placement of each part.
-        placed: Vec<([P3; 3], P3)>,
+        /// Instances: placement and layout tag of each part.
+        placed: Vec<([P3; 3], P3, Option<crate::view::Arrangement>)>,
     }
     let mut groups: Vec<Group> = Vec::new();
     // The sub-assemblies in the view's order: key and name.
@@ -269,7 +291,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         );
         if let Some(&i) = by_blank.get(&key) {
             groups[i].part_ids.push(p.id);
-            groups[i].placed.push((p.matrix, p.position));
+            groups[i].placed.push((p.matrix, p.position, p.tag));
             continue;
         }
         let Some(si) = view.solids.iter().position(|s| s.id == p.solid) else {
@@ -295,7 +317,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 scale: 1.0,
                 material: p.material,
                 thickness: p.thickness,
-                placed: vec![(p.matrix, p.position)],
+                placed: vec![(p.matrix, p.position, p.tag)],
             });
             continue;
         }
@@ -312,7 +334,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                     scale: p.scale,
                     material: p.material,
                     thickness: p.thickness,
-                    placed: vec![(p.matrix, p.position)],
+                    placed: vec![(p.matrix, p.position, p.tag)],
                 });
             }
             Err(message) => skipped.push(Skipped {
@@ -428,7 +450,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
     let mut instances = Vec::new();
     for (k, &gi) in order.iter().enumerate() {
         let g = &groups[gi];
-        for (m, p) in &g.placed {
+        for (m, p, tag) in &g.placed {
             instances.push(assembly::Instance {
                 row: k,
                 // A plate without bends is its solid, thickness and
@@ -446,17 +468,22 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                 },
                 matrix: *m,
                 position: *p,
+                tag: *tag,
             });
         }
     }
     let scene = assembly::scene(&instances);
     let iso = scene
         .as_ref()
-        .and_then(|(sc, owner)| sc.render(iso::Dir::Iso).map(|iso| (iso, owner)));
+        .and_then(|(sc, owner, _)| sc.render(iso::Dir::Iso).map(|iso| (iso, owner)));
     let arrangement_plan = scene
         .as_ref()
         .filter(|_| iso.is_some())
-        .and_then(|(sc, owner)| arrangement::plan(sc, owner, &rows));
+        .and_then(|(sc, owner, tags)| arrangement::plan(sc, owner, tags, &rows));
+    let notes = arrangement_plan
+        .as_ref()
+        .map(|p| p.notes.clone())
+        .unwrap_or_default();
 
     // Page plan: cover, assembly (+ parts list overflow), laser list,
     // bend list, then the sheets.
@@ -689,7 +716,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
                         return None;
                     }
                     assembly::scene(&sub)
-                        .and_then(|(sc, owner)| sc.render(iso::Dir::Iso).map(|iso| (iso, owner)))
+                        .and_then(|(sc, owner, _)| sc.render(iso::Dir::Iso).map(|iso| (iso, owner)))
                 })
                 .collect();
             for (k, (g, members)) in group_pages.iter().enumerate() {
@@ -885,6 +912,7 @@ pub fn write_drawings(view: &View, meta: &Meta) -> Result<DrawingsExport, String
         assembly: assembly_report,
         assemblies: assembly_reports,
         arrangement: arrangement_report,
+        notes,
     })
 }
 
@@ -930,3 +958,5 @@ pub fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_bays;

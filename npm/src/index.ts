@@ -272,6 +272,29 @@ export type DrawingArrangement = {
   extents: [number, number, number, number, number, number];
   views: { name: "front" | "top" | "left"; origin: [number, number]; bbox: [number, number, number, number] }[];
   dimensions: DrawingArrangementDimension[];
+  /** Where the bays and levels come from: `view` (the parts'
+   * `arrangement`) or `guessed` (the parts' proportions). Missing when the
+   * sheet has no bays. */
+  bays?: "view" | "guessed";
+};
+
+/** A part's place in a cabinet's or a rack's layout, set on a view part
+ * as `arrangement`. An `upright` divides the front into bays; a `level`
+ * (shelf, shelf frame, rail) belongs to bay `bay` (0-based from the left,
+ * lowest x), or without it to every bay it spans at least half of. Once
+ * one part has an `arrangement`, nothing is guessed. */
+export type PartArrangement =
+  | { role: "upright" }
+  | { role: "level"; bay?: number }
+  | { role: "other" };
+
+/** A remark for the app to show beside the dossier. `bays-guessed`: no
+ * part has an `arrangement`, the bays were guessed from the proportions;
+ * `bays-incomplete`: fewer than two upright lines, no bays drawn;
+ * `bays-out-of-range`: a level names a bay the uprights do not make. */
+export type DrawingNote = {
+  code: "bays-guessed" | "bays-incomplete" | "bays-out-of-range" | (string & {});
+  message: string;
 };
 
 export type DrawingsResult =
@@ -289,6 +312,8 @@ export type DrawingsResult =
       assemblies: DrawingAssembly[];
       /** `null` when fewer than two parts place. */
       arrangement: DrawingArrangement | null;
+      /** What to show beside the dossier, such as guessed bays. */
+      notes: DrawingNote[];
       skipped: { id: string; message: string }[];
       /** The PDF as bytes, for a Blob or a file. */
       pdfBytes: () => Uint8Array;

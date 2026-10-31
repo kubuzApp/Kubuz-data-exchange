@@ -7,11 +7,37 @@ one sheet per blank. More formats come as the CPQ needs them.
 
 The kernel knows sheet metal: it turns a programme into exact faces (planes,
 cylinders, ruled spline strips) and edges (lines, circles, cubic splines),
-with shared vertices and each part's pose. That is the view. This repo knows
-file syntax: it maps the view one to one onto STEP entities and writes the
-parts as an assembly tree. Neither side knows the other's job, and nothing
-runs on a server. It is one small Rust crate, also built as WebAssembly for
-the browser.
+with shared vertices and each part's pose. That is the view. This repo makes
+**files and technical drawings from the exact view**: it never models a part
+itself, it reads what the kernel wrote. Nothing runs on a server; it is one
+Rust crate, also built as WebAssembly for the browser.
+
+The file writers are the small part. STEP (`src/step/`) maps the view one
+to one onto AP214 entities and writes the parts as an assembly tree; DXF
+(`src/dxf/`) writes each flat blank's outline, holes and bend lines. Most
+of the crate (about 17,000 of its 21,000 lines, tests left out) is the
+drawing dossier in `src/drawing/`, which does real drafting work on the
+view:
+
+- **projection and hidden lines**: orthographic views with hidden edges
+  found per face (`project.rs`) and the isometric and assembly pictures
+  of placed parts (`iso.rs`);
+- **sections** through the folded part from the blank and its bends
+  (`section.rs`);
+- **dimensioning** per ISO 129-1: chain dimensions on the flat pattern
+  (`dims.rs`, `features.rs`), running dimensions on the folded views
+  (`running.rs`), hole fields, pitch circles and slots (`pattern.rs`);
+- **assembly sheets** with item balloons that do not cross, group sheets
+  and detail views (`assembly.rs`, `balloons.rs`), and the general
+  arrangement with pitch runs, bays and levels (`arrangement.rs`,
+  `bays.rs`);
+- **lists**: cover, parts list, laser list and bend list (`lists.rs`);
+- **the sheet** itself: ISO 5457 frame, title block, text and logo
+  (`sheet.rs`, `text.rs`, `logo.rs`), written as PDF/A (`src/pdf/`).
+
+The view carries no drafting rules; the drawing modules hold them. So the
+line between the two repos is: the kernel decides what the part is, this
+repo decides how it is written down and drawn.
 
 ## Use it
 
@@ -249,7 +275,11 @@ first centre to the last, chained to the edges (ISO 129-1). A cabinet or
 a rack (uprights dividing the front into bays, each bay holding levels)
 gets the upright centres chained above the front view and each bay's
 levels chained from the floor inside the bay, in place of the height
-runs. A flat view
+runs. Which parts are uprights and which are levels comes from the view
+when the template says so (`arrangement` on the parts, see
+[The view](#the-view)); a view without it gets a guess from the parts'
+proportions (full-height narrow members are uprights, flat members
+spanning half a bay are levels) and the export says so in `notes`. A flat view
 places a sheet part by its neutral plane; the dossier puts every part's
 outer skin at its origin, where the kernel has it once folded, so the
 placed parts sit as the folded view has them. Then the **laser list** per material and thickness (flat
@@ -279,8 +309,17 @@ callout and its target page, and each detail view's circle, scale and
 balloons), and `arrangement` the placed parts' extents, each view's
 origin and bounds on the sheet, and every dimension (the overall values,
 the runs with their position, count, pitch and first centre, the bays and
-the levels). Parts that cannot be drawn (a mesh, a
-mirrored folded part) are listed under `skipped`.
+the levels, and in `bays` whether they came from the `view` or were
+`guessed`). Parts that cannot be drawn (a mesh, a
+mirrored folded part) are listed under `skipped`. `notes` holds what an
+app should show beside the dossier, each a stable `code` and an English
+`message`:
+
+| `code` | When |
+|---|---|
+| `bays-guessed` | No part has an `arrangement`: the bays and levels on the general arrangement are guessed from the parts' proportions. |
+| `bays-incomplete` | Parts have an `arrangement`, but fewer than two upright lines: no bays are drawn. |
+| `bays-out-of-range` | A level names a `bay` the uprights do not make: it is left off. |
 
 From the command line:
 
@@ -324,7 +363,10 @@ One JSON document. Units are millimetres.
   "parts": [{"id": "Apron", "solid": "solid-0", "material": "304", "thickness": 1.5,
              "color": "#b0b0b8",
              "position": [x, y, z], "rotation": [rx, ry, rz],
-             "matrix": [[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]]}]
+             "matrix": [[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]],
+             "name": {"nl": "Staander", "en": "Upright"},
+             "group": "frames", "groupName": {"nl": "Frame"},
+             "arrangement": {"role": "upright"}}]
 }
 ```
 
@@ -351,6 +393,23 @@ an app adds it from its material library) becomes a `STYLED_ITEM` on the
 solid, so Inventor and OpenCascade show the part in that colour. Parts that
 share a solid share one product and one `MANIFOLD_SOLID_BREP` per colour,
 so a cabinet of twelve equal plates is one model with twelve occurrences.
+
+`name`, `group` and `groupName` name the part and its sub-assembly on the
+drawings (all optional). `arrangement` (optional) is the part's place in a
+cabinet's or a rack's layout, for the general arrangement:
+
+- `{"role": "upright"}`: the part divides the front into bays. Uprights
+  whose centres along x agree (within 1 mm, front and back) are one line;
+  two or more lines make the bays between them.
+- `{"role": "level", "bay": 1}`: a shelf, shelf frame or rail of bay 1,
+  counted 0-based from the left (lowest x). Without `bay` it belongs to
+  every bay whose inner width it spans at least half of. Levels within
+  40 mm of each other (a board on its frame) are one level, the top one.
+- any other role (`"other"`): left out of the layout.
+
+As soon as one part has an `arrangement`, nothing is guessed: parts
+without one are neither uprights nor levels. CPQ fills it from the
+template.
 
 The Rust types are in [`src/view.rs`](src/view.rs). A field is renamed only
 with a matching change in the kernel. The fixtures `mesh_*.view.json` and
@@ -424,7 +483,8 @@ the three views' sizes, the overall values, every line of three or more
 equally spaced parts of one position has its run, every run rebuilds its
 centres from the printed count, pitch and first centre, and the chain to
 the edges is printed; every bay runs from one full-height part's centre
-to the next, and every level from the floor or a lower level to a placed
+to the next (the fixtures carry no `arrangement`, so the bays are the
+guessed ones), and every level from the floor or a lower level to a placed
 part's top face. A folded sheet
 is judged against the view it was drawn from (`--views`): every ordinate
 is, in its view's frame, a vertex, a hole centre, a circle's extreme, a

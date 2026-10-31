@@ -204,6 +204,38 @@ pub struct Part {
     /// The group's name per language.
     #[serde(default)]
     pub group_name: Option<std::collections::HashMap<String, String>>,
+    /// What the part is in a cabinet's or a rack's layout, from the
+    /// template: an `upright` divides the front into bays, a `level` is a
+    /// shelf, a shelf frame or a rail inside a bay. The general
+    /// arrangement sheet chains the bays and levels from these. When no
+    /// part carries one, the bays are guessed from the parts' proportions
+    /// and the export says so ([`crate::drawing::Note`]).
+    #[serde(default)]
+    pub arrangement: Option<Arrangement>,
+}
+
+/// A part's place in a cabinet's layout:
+/// `{ "role": "upright" }` or `{ "role": "level", "bay": 1 }`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Arrangement {
+    pub role: ArrangementRole,
+    /// For a level: the bay it belongs to, 0-based from the left (the
+    /// lowest x) between the uprights' centres. Without it a level
+    /// belongs to every bay it spans at least half of.
+    #[serde(default)]
+    pub bay: Option<usize>,
+}
+
+/// `upright`, `level`, or anything else (`other`, a role this version
+/// does not know): neither, the part is left out of the bays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ArrangementRole {
+    Upright,
+    Level,
+    #[serde(other)]
+    Other,
 }
 
 /// The text for `lang` of a name per language: that language, else

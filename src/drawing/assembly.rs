@@ -22,7 +22,7 @@ use super::text::{self, Lang};
 use super::Meta;
 use crate::dxf::blank::{Blank, P2};
 use crate::pdf::Doc;
-use crate::view::Solid;
+use crate::view::{Arrangement, Solid};
 
 /// What a placed part is drawn from: its flat blank folded (a bent
 /// sheet part), a flat plate's solid, or any other solid as it is (a
@@ -46,6 +46,8 @@ pub struct Instance<'a> {
     pub shape: Shape<'a>,
     pub matrix: [P3; 3],
     pub position: P3,
+    /// The part's place in a cabinet's layout, from the view.
+    pub tag: Option<Arrangement>,
 }
 
 impl Instance<'_> {
@@ -131,10 +133,11 @@ const LABEL_H: f64 = 3.5;
 const LABEL_GAP: f64 = 7.5;
 
 /// The scene of every instance, with the row each object of it belongs
-/// to; `None` when nothing folds or places.
-pub fn scene(instances: &[Instance]) -> Option<(Scene, Vec<usize>)> {
+/// to and its layout tag; `None` when nothing folds or places.
+pub fn scene(instances: &[Instance]) -> Option<(Scene, Vec<usize>, Vec<Option<Arrangement>>)> {
     let mut sc = Scene::new();
     let mut owner_row = Vec::new();
+    let mut tags = Vec::new();
     for inst in instances {
         let added = match inst.shape {
             Shape::Blank { blank, thickness } => {
@@ -150,12 +153,13 @@ pub fn scene(instances: &[Instance]) -> Option<(Scene, Vec<usize>)> {
         };
         if added.is_some() {
             owner_row.push(inst.row);
+            tags.push(inst.tag);
         }
     }
     if sc.objects() == 0 {
         return None;
     }
-    Some((sc, owner_row))
+    Some((sc, owner_row, tags))
 }
 
 /// What one assembly sheet shows.
