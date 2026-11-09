@@ -26,8 +26,28 @@ export type StepResult = { ok: true; step: string } | { ok: false; error: string
 /** What the drawing does not say about a bend line, in the order of the lines. */
 export type DxfBend = { id: string; angleDeg: number; direction: "up" | "down"; insideRadius: number };
 
+/**
+ * A pocket, blind hole or countersink, in the order of its outline on the
+ * MILL (entry `outer`) or MILL_BACK (entry `inner`) layer. Not cut; a
+ * countersunk through hole's bore is on CUT.
+ */
+export type DxfMill = {
+  id: string;
+  entry: "outer" | "inner";
+  through: boolean;
+  depth: number;
+  countersink?: { angleDeg: number; diameter: number };
+};
+
 /** One DXF flat pattern: the blank that `partIds` share, `quantity` times. */
-export type DxfFile = { name: string; partIds: string[]; quantity: number; bends: DxfBend[]; dxf: string };
+export type DxfFile = {
+  name: string;
+  partIds: string[];
+  quantity: number;
+  bends: DxfBend[];
+  mills: DxfMill[];
+  dxf: string;
+};
 
 export type DxfResult =
   | { ok: true; files: DxfFile[]; skipped: { id: string; message: string }[] }

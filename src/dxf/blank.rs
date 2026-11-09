@@ -88,11 +88,27 @@ impl Default for Frame {
     }
 }
 
+/// A milled pocket, blind hole or countersink seen on the blank: the
+/// outline of its opening, which skin the tool enters, and how deep.
+#[derive(Clone, Debug)]
+pub struct MillOutline {
+    pub id: String,
+    /// The tool enters the inner skin, the side away from the viewer.
+    pub inner: bool,
+    pub through: bool,
+    pub depth: f64,
+    /// Included angle and diameter of a countersink.
+    pub countersink: Option<(f64, f64)>,
+    pub segs: Vec<Seg>,
+}
+
 /// A flat pattern: closed loops of segments (the outline and the holes,
-/// all cut), the bend lines, and the zones the kernel cut the skin into.
+/// all cut), the bend lines, the mill openings (not cut), and the zones
+/// the kernel cut the skin into.
 #[derive(Clone, Debug, Default)]
 pub struct Blank {
     pub loops: Vec<Vec<Seg>>,
+    pub mills: Vec<MillOutline>,
     pub bends: Vec<BendLine>,
     pub zones: Vec<Zone>,
     pub min: P2,
@@ -181,6 +197,17 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
         [if mirror { -x } else { x }, y]
     };
 
+    // A mill's opening on the outer skin is not cut: it is drawn on its
+    // own layer below.
+    let mut opening_edge = vec![false; solid.edges.len()];
+    for m in solid.mills.iter().filter(|m| m.entry == "outer") {
+        for le in mill_loop(solid, m.opening)? {
+            if let Some(slot) = opening_edge.get_mut(le.edge) {
+                *slot = true;
+            }
+        }
+    }
+
     // Edges used once across the outer skin bound the blank.
     let mut uses: HashMap<usize, usize> = HashMap::new();
     for &fi in &outer {
@@ -192,7 +219,7 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
     let mut boundary = 0usize;
     for &fi in &outer {
         for le in solid.faces[fi].loops.iter().flatten() {
-            if uses[&le.edge] != 1 {
+            if uses[&le.edge] != 1 || opening_edge.get(le.edge) == Some(&true) {
                 continue;
             }
             let e = solid
@@ -238,6 +265,32 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
         }
     }
 
+    // Each mill's opening, and the loop a through mill leaves in the
+    // inner skin: that one the laser cuts.
+    let mut mills = Vec::new();
+    for m in &solid.mills {
+        let segs_of = |at: [usize; 2]| -> Result<Vec<Seg>, String> {
+            mill_loop(solid, at)?
+                .iter()
+                .map(|le| segment(solid, le.edge, le.forward, &to2, n, mirror, scale))
+                .collect()
+        };
+        let inner = m.entry != "outer";
+        if m.through && !inner {
+            if let Some(exit) = m.exit {
+                loops.push(segs_of(exit)?);
+            }
+        }
+        mills.push(MillOutline {
+            id: m.id.clone(),
+            inner,
+            through: m.through,
+            depth: m.depth * scale,
+            countersink: m.countersink.map(|c| (c.angle_deg, c.diameter * scale)),
+            segs: segs_of(m.opening)?,
+        });
+    }
+
     let d = outer
         .iter()
         .flat_map(|&fi| solid.faces[fi].loops.iter().flatten())
@@ -248,6 +301,7 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
         .unwrap_or(0.0);
     let mut blank = Blank {
         loops,
+        mills,
         frame: Frame {
             u,
             v,
@@ -315,6 +369,16 @@ pub fn flat_blank(solid: &Solid, mirror: bool, scale: f64) -> Result<Blank, Stri
     }
     blank.normalise();
     Ok(blank)
+}
+
+/// The loop `[face, loop]` of a mill.
+fn mill_loop(solid: &Solid, [f, l]: [usize; 2]) -> Result<&[crate::view::LoopEdge], String> {
+    solid
+        .faces
+        .get(f)
+        .and_then(|face| face.loops.get(l))
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("mill loop [{f}, {l}] missing"))
 }
 
 fn segment(
@@ -425,7 +489,12 @@ impl Blank {
             p[0] += shift[0];
             p[1] += shift[1];
         };
-        for s in self.loops.iter_mut().flatten() {
+        for s in self
+            .loops
+            .iter_mut()
+            .flatten()
+            .chain(self.mills.iter_mut().flat_map(|m| m.segs.iter_mut()))
+        {
             match s {
                 Seg::Line { a, b } => {
                     mv(a);

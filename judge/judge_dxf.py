@@ -3,9 +3,9 @@
     python judge_dxf.py out/Top.dxf [more.dxf ...]     one line of JSON per file
 
 Each file must read as DXF R12, pass ezdxf's audit with no error, keep every
-entity on CUT, BEND or ENGRAVE, carry no text, and have its CUT entities
-chain into closed loops (every end point shared by exactly two segments, or
-a whole circle). The exit code is the number of files that failed.
+entity on CUT, BEND, ENGRAVE, MILL or MILL_BACK, carry no text, and have
+its CUT entities, and each mill layer's, chain into closed loops (every end
+point shared by exactly two segments, or a whole circle). The exit code is the number of files that failed.
 """
 
 import json
@@ -15,18 +15,19 @@ from collections import Counter
 
 import ezdxf
 
-LAYERS = {"CUT", "BEND", "ENGRAVE"}
+LAYERS = {"CUT", "BEND", "ENGRAVE", "MILL", "MILL_BACK"}
+CLOSED = ("CUT", "MILL", "MILL_BACK")
 TOL = 1e-3
 
 
-def cut_loops_close(msp):
-    """Every CUT line or arc end is shared by exactly two segments, within
-    TOL millimetres."""
+def loops_close(msp, layer):
+    """Every line or arc end on `layer` is shared by exactly two segments,
+    within TOL millimetres."""
     points = []
-    for e in msp.query('LINE[layer=="CUT"]'):
+    for e in msp.query(f'LINE[layer=="{layer}"]'):
         points.append((e.dxf.start[0], e.dxf.start[1]))
         points.append((e.dxf.end[0], e.dxf.end[1]))
-    for e in msp.query('ARC[layer=="CUT"]'):
+    for e in msp.query(f'ARC[layer=="{layer}"]'):
         c, r = e.dxf.center, e.dxf.radius
         for a in (e.dxf.start_angle, e.dxf.end_angle):
             t = math.radians(a)
@@ -63,9 +64,10 @@ def judge(path):
     for layer in LAYERS:
         if layer not in doc.layers:
             out["problems"].append(f"layer {layer} missing")
-    loose = cut_loops_close(msp)
-    if loose:
-        out["problems"].append(f"{len(loose)} open end(s) on CUT")
+    for layer in CLOSED:
+        loose = loops_close(msp, layer)
+        if loose:
+            out["problems"].append(f"{len(loose)} open end(s) on {layer}")
     texts = sum(n for (k, _), n in kinds.items() if k in ("TEXT", "MTEXT"))
     if texts:
         out["problems"].append(f"{texts} text entit(ies)")

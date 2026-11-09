@@ -82,7 +82,7 @@ cargo run --release --example view2dxf -- flat.view.json out_dir
 ```
 
 Each file is DXF R12 (`AC1009`), in millimetres, the blank seen from its
-outer skin with its lower-left corner at the origin, on three layers and
+outer skin with its lower-left corner at the origin, on five layers and
 with no text, so nothing in the file can be taken for a cut:
 
 | Layer | Holds |
@@ -90,6 +90,15 @@ with no text, so nothing in the file can be taken for a cut:
 | `CUT` | The outline and every hole, as `LINE`, `ARC` and `CIRCLE` entities. |
 | `BEND` | One dashed `LINE` down the middle of each bend zone. |
 | `ENGRAVE` | Declared for markings; empty until the kernel has some. |
+| `MILL` | The opening of each pocket, blind hole and countersink milled from the outer skin (the side the file shows). Not cut. |
+| `MILL_BACK` | The same for mills from the inner skin, dashed. Not cut. |
+
+A countersunk through hole cuts its bore on `CUT` and has its countersink's
+circle on a mill layer. Each file's `mills` lists, in the order of their
+outlines, the mill's `id`, `entry` (`outer` or `inner`), `through`, `depth`
+and, for a countersink, `countersink: {angleDeg, diameter}`. The drawing's
+flat pattern draws the openings thin (dashed from the inner skin) and
+notes them by kind.
 
 What the drawing does not say about a bend comes back beside it: each file's
 `bends` lists, in the order of the lines, the bend's `id`, `angleDeg`,
@@ -395,6 +404,11 @@ Rules the kernel keeps and the writer relies on:
 - a flat view's solid lists its `bends`: the centre line of each bend zone
   on the sheet's zero, the unsigned angle, `up` or `down` seen from the
   outer skin, the inside radius and the allowance. A folded solid has none;
+- a sheet's solid lists its `mills` (pockets, blind holes, countersinks):
+  `{id, entry: "outer"|"inner", through, depth, countersink?: {angleDeg,
+  diameter}, opening: [face, loop], exit?: [face, loop]}`. `opening` is
+  the loop in the entry skin, `exit` the loop a through mill leaves in the
+  other skin. Their bores, cones and floors are ordinary faces;
 - world point = `matrix` · local point + `position`. `rotation` is the same
   pose in degrees, R = Rx · Ry · Rz, and is used only when `matrix` is absent.
 
@@ -452,8 +466,9 @@ blank back.
 
 DXF files have a judge too: [`judge/judge_dxf.py`](judge/judge_dxf.py)
 reads each one back with [ezdxf](https://ezdxf.mozman.at/), audits it,
-checks that every entity sits on `CUT`, `BEND` or `ENGRAVE`, that there is
-no text, and that the `CUT` entities close into loops.
+checks that every entity sits on `CUT`, `BEND`, `ENGRAVE`, `MILL` or
+`MILL_BACK`, that there is no text, and that the `CUT` and mill entities
+close into loops.
 
 ```
 pip install ezdxf==1.4.5

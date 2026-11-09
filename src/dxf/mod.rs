@@ -1,6 +1,9 @@
 //! DXF flat patterns from the exact-geometry view: one file per distinct
 //! sheet blank, with the outline and holes on the CUT layer and the
-//! kernel's bend lines on the BEND layer. The ENGRAVE layer is declared
+//! kernel's bend lines on the BEND layer. The openings of milled pockets,
+//! blind holes and countersinks are on MILL (milled from the outer skin,
+//! the side the file shows) or MILL_BACK (from the inner skin); they are
+//! not cut, but a countersunk through hole's bore is. The ENGRAVE layer is declared
 //! for markings and empty for now; no text is written, so nothing in the
 //! file can be mistaken for a cut. Each bend's angle, direction and inside
 //! radius come back in the result's `bends`, for a job sheet.
@@ -25,6 +28,8 @@ pub struct DxfFile {
     pub part_ids: Vec<String>,
     /// The blank's bends, in the order of their lines in the file.
     pub bends: Vec<BendInfo>,
+    /// The blank's mills, in the order of their outlines in the file.
+    pub mills: Vec<MillInfo>,
     pub dxf: String,
 }
 
@@ -35,6 +40,18 @@ pub struct BendInfo {
     pub angle_deg: f64,
     pub direction: BendDirection,
     pub inside_radius: f64,
+}
+
+/// What the drawing does not say about a mill opening.
+#[derive(Clone, Debug)]
+pub struct MillInfo {
+    pub id: String,
+    /// `outer` or `inner`: the skin the tool enters.
+    pub entry: &'static str,
+    pub through: bool,
+    pub depth: f64,
+    /// Included angle and diameter of a countersink.
+    pub countersink: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,8 +68,9 @@ pub struct DxfExport {
 
 impl DxfExport {
     /// `{ "ok": true, "files": [{ name, partIds, quantity, bends: [{ id,
-    /// angleDeg, direction, insideRadius }], dxf }], "skipped": [{ id,
-    /// message }] }`.
+    /// angleDeg, direction, insideRadius }], mills: [{ id, entry, through,
+    /// depth, countersink?: { angleDeg, diameter } }], dxf }], "skipped":
+    /// [{ id, message }] }`.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "ok": true,
@@ -66,6 +84,19 @@ impl DxfExport {
                     "direction": b.direction.label().to_lowercase(),
                     "insideRadius": b.inside_radius,
                 })).collect::<Vec<_>>(),
+                "mills": f.mills.iter().map(|m| {
+                    let mut v = serde_json::json!({
+                        "id": m.id,
+                        "entry": m.entry,
+                        "through": m.through,
+                        "depth": m.depth,
+                    });
+                    if let Some((angle, diameter)) = m.countersink {
+                        v["countersink"] =
+                            serde_json::json!({ "angleDeg": angle, "diameter": diameter });
+                    }
+                    v
+                }).collect::<Vec<_>>(),
                 "dxf": f.dxf,
             })).collect::<Vec<_>>(),
             "skipped": self.skipped.iter().map(|s| serde_json::json!({
@@ -134,6 +165,17 @@ pub fn write_dxf(view: &View) -> Result<DxfExport, String> {
                             angle_deg: b.angle_deg,
                             direction: b.direction,
                             inside_radius: b.inside_radius,
+                        })
+                        .collect(),
+                    mills: blank
+                        .mills
+                        .iter()
+                        .map(|m| MillInfo {
+                            id: m.id.clone(),
+                            entry: if m.inner { "inner" } else { "outer" },
+                            through: m.through,
+                            depth: m.depth,
+                            countersink: m.countersink,
                         })
                         .collect(),
                     dxf,
