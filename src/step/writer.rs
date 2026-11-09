@@ -132,6 +132,25 @@ impl StepWriter {
         self.add(format!("CYLINDRICAL_SURFACE('',#{ax},{})", f(r)))
     }
 
+    /// STEP's semi-angle is in radians, the file's plane angle unit.
+    pub fn cone(&mut self, o: P3, axis: P3, refd: P3, r: f64, semi_angle_rad: f64) -> usize {
+        let ax = self.axis(o, axis, refd);
+        self.add(format!(
+            "CONICAL_SURFACE('',#{ax},{},{})",
+            f(r),
+            f(semi_angle_rad)
+        ))
+    }
+
+    pub fn torus(&mut self, c: P3, axis: P3, refd: P3, major: f64, minor: f64) -> usize {
+        let ax = self.axis(c, axis, refd);
+        self.add(format!(
+            "TOROIDAL_SURFACE('',#{ax},{},{})",
+            f(major),
+            f(minor)
+        ))
+    }
+
     pub fn bspline_curve(
         &mut self,
         degree: usize,

@@ -32,6 +32,7 @@ pub mod lists;
 pub mod logo;
 pub mod pattern;
 pub mod project;
+pub mod revolved;
 pub mod running;
 pub mod section;
 pub mod sheet;
@@ -960,3 +961,5 @@ pub fn base64(bytes: &[u8]) -> String {
 mod tests;
 #[cfg(test)]
 mod tests_bays;
+#[cfg(test)]
+mod tests_revolved;

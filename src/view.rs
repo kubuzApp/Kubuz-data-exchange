@@ -138,6 +138,26 @@ pub enum Surface {
         axis: P3,
         radius: f64,
     },
+    /// A right circular cone: `radius` at `origin`, growing by
+    /// tan(`semiAngleDeg`) per millimetre along `axis` (shrinking when the
+    /// angle is negative). The normal points away from the axis.
+    #[serde(rename_all = "camelCase")]
+    Cone {
+        origin: P3,
+        axis: P3,
+        radius: f64,
+        semi_angle_deg: f64,
+    },
+    /// A torus about `axis` through `center`: the tube's centre circle has
+    /// `majorRadius`, the tube `minorRadius`. The normal points away from
+    /// the tube's centre circle.
+    #[serde(rename_all = "camelCase")]
+    Torus {
+        center: P3,
+        axis: P3,
+        major_radius: f64,
+        minor_radius: f64,
+    },
     /// Degree 1 between two B-spline curves (indices into `curves`) with the
     /// same degree and knots. u follows the curves, v runs from `top` to
     /// `bottom`; the normal is du × dv.

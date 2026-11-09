@@ -6,7 +6,8 @@ patterns of the sheet blanks, and a PDF/A dossier of ISO detail drawings,
 one sheet per blank. More formats come as the CPQ needs them.
 
 The kernel knows sheet metal: it turns a programme into exact faces (planes,
-cylinders, ruled spline strips) and edges (lines, circles, cubic splines),
+cylinders, cones, tori, ruled spline strips) and edges (lines, circles, cubic
+splines),
 with shared vertices and each part's pose. That is the view. This repo makes
 **files and technical drawings from the exact view**: it never models a part
 itself, it reads what the kernel wrote. Nothing runs on a server; it is one
@@ -349,6 +350,10 @@ One JSON document. Units are millimetres.
     "surfaces": [
       {"kind": "plane", "origin": [x, y, z], "normal": [x, y, z]},
       {"kind": "cylinder", "origin": [x, y, z], "axis": [x, y, z], "radius": 2.1},
+      {"kind": "cone", "origin": [x, y, z], "axis": [x, y, z], "radius": 50.0,
+       "semiAngleDeg": -26.57},
+      {"kind": "torus", "center": [x, y, z], "axis": [x, y, z],
+       "majorRadius": 50.0, "minorRadius": 10.0},
       {"kind": "ruledBspline", "top": 2, "bottom": 3}
     ],
     "faces": [{
@@ -380,6 +385,12 @@ Rules the kernel keeps and the writer relies on:
 - a face's first loop is its outer bound, the rest are holes;
 - a `ruledBspline` is degree 1 between two `bspline` curves with the same
   degree and knots, u along them and v from `top` to `bottom`, normal du × dv;
+- a `cone` has `radius` at `origin` and grows by tan(`semiAngleDeg`) per
+  millimetre along `axis` (a negative angle narrows); a `torus` sweeps a
+  circle of `minorRadius` round `axis` at `majorRadius` from `center`. Both
+  have their normal pointing away from the axis (cone) or the tube's centre
+  line (torus), like a cylinder; STEP gets a positive semi-angle in radians,
+  with the axis flipped where needed;
 - identical parts share one solid;
 - a flat view's solid lists its `bends`: the centre line of each bend zone
   on the sheet's zero, the unsigned angle, `up` or `down` seen from the

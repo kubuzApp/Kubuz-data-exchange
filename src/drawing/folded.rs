@@ -211,13 +211,27 @@ pub fn analyse(solid: &Solid, topo: &Topology, thickness: f64) -> Result<Analysi
         if f.role != "outerSkin" {
             continue;
         }
-        let Some(Surface::Cylinder {
-            origin,
-            axis,
-            radius,
-        }) = solid.surfaces.get(f.surface)
-        else {
-            continue;
+        let (origin, axis, radius) = match solid.surfaces.get(f.surface) {
+            Some(Surface::Cylinder {
+                origin,
+                axis,
+                radius,
+            }) => (origin, axis, radius),
+            // A cone or a torus is drawn like a roll: seen along its axis.
+            Some(
+                Surface::Cone { origin, axis, .. }
+                | Surface::Torus {
+                    center: origin,
+                    axis,
+                    ..
+                },
+            ) => {
+                if !rolls.iter().any(|r: &(P3, P3)| r.0 == *origin) {
+                    rolls.push((*origin, unit(*axis)));
+                }
+                continue;
+            }
+            _ => continue,
         };
         let axis = unit(*axis);
         // The flanges this zone runs into, through the edges it shares
