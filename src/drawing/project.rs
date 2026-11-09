@@ -172,6 +172,9 @@ pub fn face_normal(solid: &Solid, fi: usize, p: P3) -> P3 {
                 unit(rad)
             }
         }
+        Some(s @ (Surface::Cone { .. } | Surface::Torus { .. })) => {
+            super::revolved::Rev::of(s).map_or([0.0, 0.0, 1.0], |r| r.normal_at(p))
+        }
         Some(Surface::RuledBspline { top, bottom }) => {
             // The normal at the nearest of a few rulings.
             let (Some(t), Some(b)) = (solid.curves.get(*top), solid.curves.get(*bottom)) else {
@@ -533,7 +536,7 @@ impl Buffer {
 
 /// The depth plane through three view points `(x, y, depth)`, or none
 /// when they are collinear in the view.
-fn depth_plane(p: [[f64; 3]; 3]) -> Option<[f64; 3]> {
+pub(crate) fn depth_plane(p: [[f64; 3]; 3]) -> Option<[f64; 3]> {
     let [a, b, c] = p;
     let det = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
     if det.abs() < 1e-9 {
@@ -545,7 +548,7 @@ fn depth_plane(p: [[f64; 3]; 3]) -> Option<[f64; 3]> {
 }
 
 /// Sutherland–Hodgman clip of a polygon to `lo <= v[axis] <= hi`.
-fn clip_band(poly: &[P2], axis: usize, lo: f64, hi: f64) -> Vec<P2> {
+pub(crate) fn clip_band(poly: &[P2], axis: usize, lo: f64, hi: f64) -> Vec<P2> {
     let a = clip_half(poly, axis, lo, true);
     clip_half(&a, axis, hi, false)
 }
@@ -735,6 +738,8 @@ pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> 
 
     // Faces into the buffer.
     let mut silhouettes: Vec<Vec<P3>> = Vec::new();
+    // Per silhouette, the surface normal at each point (empty: none).
+    let mut sil_probe: Vec<Vec<P3>> = Vec::new();
     for f in &solid.faces {
         let loops2: Vec<Vec<P2>> = f
             .loops
@@ -918,6 +923,31 @@ pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> 
                     }
                 }
             }
+            Some(s @ (Surface::Cone { .. } | Surface::Torus { .. })) => {
+                let Some(rev) = super::revolved::Rev::of(s) else {
+                    continue;
+                };
+                let edge_pts = |ei: usize| fine.get(ei).map(|s| s.pts.clone());
+                let params = super::revolved::face_params(&rev, f, &edge_pts);
+                let mut put =
+                    |l: &[Vec<P2>], plane: [f64; 3], lo: f64, hi: f64| buf.fill(l, plane, lo, hi);
+                super::revolved::project_face(
+                    &rev,
+                    &params,
+                    &basis,
+                    THIN,
+                    step,
+                    &mut put,
+                    &mut silhouettes,
+                );
+                // The surface turns away along the view near its own
+                // silhouette, so a point a hair inside is often nearer: each
+                // silhouette point is tested a little outward on paper.
+                while sil_probe.len() < silhouettes.len() {
+                    let k = sil_probe.len();
+                    sil_probe.push(silhouettes[k].iter().map(|p| rev.normal_at(*p)).collect());
+                }
+            }
             Some(Surface::RuledBspline { top, bottom }) => {
                 let (Some(t), Some(b)) = (solid.curves.get(*top), solid.curves.get(*bottom)) else {
                     continue;
@@ -972,14 +1002,21 @@ pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> 
         smooth_states(&mut st);
         states.push(st);
     }
+    sil_probe.resize(silhouettes.len(), Vec::new());
     let sil_states: Vec<Vec<State>> = silhouettes
         .iter()
-        .map(|pts| {
+        .zip(&sil_probe)
+        .map(|(pts, normals)| {
             let tol = TOL_BASE + 0.75 * buf.px * MAX_SLOPE;
             let mut st: Vec<State> = pts
                 .iter()
-                .map(|p| {
-                    if basis.depth(*p) - tol <= buf.at(basis.xy(*p)) {
+                .enumerate()
+                .map(|(i, p)| {
+                    let q = match normals.get(i) {
+                        Some(n) => basis.xy(add(*p, scale(*n, 2.0 * buf.px))),
+                        None => basis.xy(*p),
+                    };
+                    if basis.depth(*p) - tol <= buf.at(q) {
                         State::Visible
                     } else {
                         State::Hidden
@@ -1046,6 +1083,18 @@ pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> 
         smooth_states(st);
     }
 
+    // A seam (an edge one face uses both ways) where the view grazes the
+    // face is the silhouette there: drawn as an outline, not a tangent.
+    let seam_outline: Vec<bool> = (0..solid.edges.len())
+        .map(|ei| {
+            let fs = &topo.faces_of_edge[ei];
+            if !topo.smooth[ei] || fs.len() != 2 || fs[0] != fs[1] {
+                return false;
+            }
+            let m = fine[ei].mid();
+            dot(face_normal(solid, fs[0], m), basis.d).abs() < 1e-3
+        })
+        .collect();
     // Runs into segments.
     let mut visible = Vec::new();
     let mut smooth = Vec::new();
@@ -1071,7 +1120,7 @@ pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> 
             }
             let drawn = state == State::Visible || (state == State::Hidden && !topo.smooth[ei]);
             if drawn && j > i {
-                let out = if topo.smooth[ei] {
+                let out = if topo.smooth[ei] && !seam_outline[ei] {
                     &mut smooth
                 } else if state == State::Visible {
                     &mut visible
@@ -1103,10 +1152,19 @@ pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> 
                             });
                         }
                     }
-                    _ if edge_on_circle => out.push(Seg::Line {
-                        a: pts2[i],
-                        b: pts2[j],
-                    }),
+                    // Seen edge-on a circle is a line between the run's
+                    // two farthest points (a full turn starts where it ends).
+                    _ if edge_on_circle => {
+                        let run = &pts2[i..=j];
+                        let far = |from: P2| {
+                            run.iter()
+                                .copied()
+                                .max_by(|p, q| dist2(*p, from).total_cmp(&dist2(*q, from)))
+                                .unwrap_or(from)
+                        };
+                        let a = far(pts2[i]);
+                        out.push(Seg::Line { a, b: far(a) });
+                    }
                     _ => {
                         let t = thin(&pts2[i..=j], THIN);
                         for w in t.windows(2) {
@@ -1223,7 +1281,30 @@ pub fn project(solid: &Solid, topo: &Topology, basis: Basis, thickness: f64) -> 
     }
     let ext = (max[0] - min[0]).max(max[1] - min[1]);
     let bound = (0.02 * ext).clamp(6.0, 25.0);
-    let outline = outline(&buf, &visible, &smooth, &circles, &edge_lines, bound);
+    // A torus seen along its axis has circles for silhouettes: the
+    // outline snaps to them as to an edge's circle.
+    let mut snap_circles = circles.clone();
+    for f in &solid.faces {
+        let Some(s) = solid.surfaces.get(f.surface) else {
+            continue;
+        };
+        for (c, r) in super::revolved::axial_circles(s, basis.d) {
+            snap_circles.push(PCircle {
+                edge: usize::MAX,
+                c: basis.xy(c),
+                r,
+                full: false,
+                start: 0.0,
+                end: 360.0,
+                visible: 0.0,
+                planar: false,
+                skin: false,
+                fillet: false,
+                depth: basis.depth(c),
+            });
+        }
+    }
+    let outline = outline(&buf, &visible, &smooth, &snap_circles, &edge_lines, bound);
     // A traced corner can sit a little outside the material where two
     // lines meet past a relief: the view's extent is that corner.
     let (mut min, mut max) = (min, max);
@@ -1384,10 +1465,20 @@ fn outline(
     for (p, d) in edge_lines {
         lines.push((*p, *d, None));
     }
+    // A short line that hugs a circle along its whole length (a piece of
+    // a curved silhouette) is that circle, not a line of its own.
+    let hugs = |a: P2, b: P2| {
+        let m = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        circles.iter().any(|c| {
+            [a, b, m]
+                .iter()
+                .all(|p| (dist2(*p, c.c) - c.r).abs() < 2.2 * px)
+        })
+    };
     for seg in visible.iter().chain(smooth.iter()) {
         if let Seg::Line { a, b } = *seg {
             let l = dist2(a, b);
-            if l > 2.0 * px {
+            if l > 2.0 * px && !hugs(a, b) {
                 let d = [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
                 lines.push((a, d, Some((-2.0, l + 2.0))));
             }

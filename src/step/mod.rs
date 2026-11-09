@@ -361,6 +361,32 @@ fn solid_brep(w: &mut StepWriter, s: &Solid) -> Result<usize, String> {
                 let axis = unit(*axis);
                 w.cylinder(*origin, axis, any_perp(axis), *radius)
             }
+            Surface::Cone {
+                origin,
+                axis,
+                radius,
+                semi_angle_deg,
+            } => {
+                let axis = unit(*axis);
+                // STEP wants a positive radius and an angle in (0, 90°):
+                // a cone that shrinks along its axis is written the other
+                // way round, which is the same surface.
+                let (axis, angle) = if *semi_angle_deg < 0.0 {
+                    ([-axis[0], -axis[1], -axis[2]], -semi_angle_deg)
+                } else {
+                    (axis, *semi_angle_deg)
+                };
+                w.cone(*origin, axis, any_perp(axis), *radius, angle.to_radians())
+            }
+            Surface::Torus {
+                center,
+                axis,
+                major_radius,
+                minor_radius,
+            } => {
+                let axis = unit(*axis);
+                w.torus(*center, axis, any_perp(axis), *major_radius, *minor_radius)
+            }
             Surface::RuledBspline { top, bottom } => {
                 let t = s.curves.get(*top).ok_or_else(|| bad("curve", *top))?;
                 let b = s.curves.get(*bottom).ok_or_else(|| bad("curve", *bottom))?;
@@ -427,7 +453,41 @@ mod tests {
             "deck_splash",
             include_str!("../../fixtures/deck_splash.view.json"),
         ),
+        (
+            "cone_frustum",
+            include_str!("../../fixtures/cone_frustum.view.json"),
+        ),
+        (
+            "torus_elbow",
+            include_str!("../../fixtures/torus_elbow.view.json"),
+        ),
     ];
+
+    #[test]
+    fn cones_and_tori_are_analytic_surfaces() {
+        let cone = write_step_json(FIXTURES[6].1, "cone").unwrap();
+        // The frustum narrows along +z: the axis is flipped so the
+        // semi-angle is positive, in radians.
+        let line = cone
+            .lines()
+            .find(|l| l.contains("CONICAL_SURFACE("))
+            .unwrap();
+        let angle: f64 = line
+            .trim_end_matches(");")
+            .rsplit(',')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((angle - (20.0f64 / 40.0).atan()).abs() < 1e-9, "{line}");
+        assert_eq!(cone.matches("CONICAL_SURFACE(").count(), 2);
+        let torus = write_step_json(FIXTURES[7].1, "torus").unwrap();
+        assert_eq!(torus.matches("TOROIDAL_SURFACE(").count(), 2);
+        assert!(
+            torus.contains(",50.,10.)") || torus.contains(",50.0,10.0)"),
+            "{torus}"
+        );
+    }
 
     /// A closed solid uses every edge twice, once each way.
     fn each_edge_twice_each_way(text: &str) -> Result<(), String> {

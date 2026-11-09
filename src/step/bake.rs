@@ -65,6 +65,30 @@ pub fn bake(solid: &Solid, id: &str, m: [P3; 3], t: P3, scale: f64) -> Solid {
                 axis: vec(*axis),
                 radius: radius * scale,
             },
+            // Cone and torus normals point away from their axis or tube,
+            // whatever way the axis runs, so a mirror image needs no flip.
+            Surface::Cone {
+                origin,
+                axis,
+                radius,
+                semi_angle_deg,
+            } => Surface::Cone {
+                origin: pt(*origin),
+                axis: vec(*axis),
+                radius: radius * scale,
+                semi_angle_deg: *semi_angle_deg,
+            },
+            Surface::Torus {
+                center,
+                axis,
+                major_radius,
+                minor_radius,
+            } => Surface::Torus {
+                center: pt(*center),
+                axis: vec(*axis),
+                major_radius: major_radius * scale,
+                minor_radius: minor_radius * scale,
+            },
             Surface::RuledBspline { top, bottom } => Surface::RuledBspline {
                 top: *top,
                 bottom: *bottom,

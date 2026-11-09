@@ -13,6 +13,7 @@
 
 use super::features::outer_loop;
 use super::project::{self, bspline, sample_edge};
+use super::revolved::{self, Rev};
 use super::section::{fold, P3};
 use crate::dxf::blank::{Blank, P2};
 use crate::step::writer::{any_perp, cross, sub, unit};
@@ -202,16 +203,40 @@ struct Cyl {
     e2: P3,
 }
 
+/// A cone or torus face placed in the world, with its loops in (u, v).
+struct RevFace {
+    zone: usize,
+    object: usize,
+    rev: Rev,
+    params: Vec<Vec<P2>>,
+}
+
 /// Placed parts, ready to render.
 #[derive(Default)]
 pub struct Scene {
     facets: Vec<Facet>,
     lines: Vec<Line>,
     cyls: Vec<Cyl>,
+    /// Cone and torus faces in the world, for their silhouettes.
+    revs: Vec<RevFace>,
     zones: usize,
     objects: usize,
     /// Each object's bounds in model space.
     bounds: Vec<[f64; 6]>,
+}
+
+/// Chord error of the cone and torus facets, in millimetres.
+const REV_TOL: f64 = 0.25;
+
+/// Twice the signed area of a polygon.
+fn area2(pts: &[P2]) -> f64 {
+    let n = pts.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum()
 }
 
 fn bbox_of(pts: &[P2]) -> [f64; 4] {
@@ -835,6 +860,36 @@ impl Scene {
                         e2: we2,
                     });
                 }
+                Some(s @ (Surface::Cone { .. } | Surface::Torus { .. })) => {
+                    let Some(rev) = Rev::of(s) else {
+                        continue;
+                    };
+                    let edge_pts = |ei: usize| Some(sample_edge(solid, ei, step).pts);
+                    let params = revolved::face_params(&rev, f, &edge_pts);
+                    for (_, cell) in revolved::cells(&rev, &params, REV_TOL) {
+                        // The loop with the largest area is the cell's
+                        // outline, the others are holes in it.
+                        let mut cell: Vec<(f64, Vec<P3>)> = cell
+                            .into_iter()
+                            .map(|lp| {
+                                let a = area2(&lp).abs();
+                                (a, lp.iter().map(|q| world(rev.at(q[0], q[1]))).collect())
+                            })
+                            .collect();
+                        cell.sort_by(|a, b| b.0.total_cmp(&a.0));
+                        let mut it = cell.into_iter().map(|(_, l)| l);
+                        let Some(outer) = it.next() else {
+                            continue;
+                        };
+                        self.push_facet(object, zone, outer, it.collect());
+                    }
+                    self.revs.push(RevFace {
+                        zone,
+                        object,
+                        rev: rev.mapped(world),
+                        params,
+                    });
+                }
                 Some(Surface::RuledBspline { top, bottom }) => {
                     let (Some(t), Some(b)) = (solid.curves.get(*top), solid.curves.get(*bottom))
                     else {
@@ -922,6 +977,25 @@ impl Scene {
                     thin: false,
                 });
             }
+        }
+        for rf in &self.revs {
+            let mut pieces = Vec::new();
+            revolved::silhouette(
+                &rf.rev,
+                &rf.params,
+                v,
+                &|p| dir.project(p).0,
+                REV_TOL,
+                1.0,
+                &mut pieces,
+            );
+            out.extend(pieces.into_iter().map(|pts| Line {
+                zones: [rf.zone, rf.zone],
+                pts,
+                closed: false,
+                object: rf.object,
+                thin: false,
+            }));
         }
         out
     }

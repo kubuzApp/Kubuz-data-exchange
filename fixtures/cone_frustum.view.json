@@ -1,0 +1,317 @@
+{
+ "units": "mm",
+ "solids": [
+  {
+   "id": "solid-0",
+   "vertices": [
+    [
+     50.0,
+     0,
+     0
+    ],
+    [
+     30.0,
+     0,
+     40.0
+    ],
+    [
+     48.32294901687516,
+     0,
+     0
+    ],
+    [
+     28.322949016875157,
+     0,
+     40.0
+    ]
+   ],
+   "curves": [
+    {
+     "kind": "line"
+    },
+    {
+     "kind": "circle",
+     "center": [
+      0,
+      0,
+      40.0
+     ],
+     "axis": [
+      0,
+      0,
+      -1
+     ],
+     "radius": 30.0
+    },
+    {
+     "kind": "circle",
+     "center": [
+      0,
+      0,
+      0
+     ],
+     "axis": [
+      0,
+      0,
+      1
+     ],
+     "radius": 50.0
+    },
+    {
+     "kind": "circle",
+     "center": [
+      0,
+      0,
+      0
+     ],
+     "axis": [
+      0,
+      0,
+      -1
+     ],
+     "radius": 48.32294901687516
+    },
+    {
+     "kind": "line"
+    },
+    {
+     "kind": "circle",
+     "center": [
+      0,
+      0,
+      40.0
+     ],
+     "axis": [
+      0,
+      0,
+      1
+     ],
+     "radius": 28.322949016875157
+    }
+   ],
+   "edges": [
+    {
+     "curve": 0,
+     "start": 0,
+     "end": 1
+    },
+    {
+     "curve": 1,
+     "start": 1,
+     "end": 1
+    },
+    {
+     "curve": 2,
+     "start": 0,
+     "end": 0
+    },
+    {
+     "curve": 3,
+     "start": 2,
+     "end": 2
+    },
+    {
+     "curve": 4,
+     "start": 2,
+     "end": 3
+    },
+    {
+     "curve": 5,
+     "start": 3,
+     "end": 3
+    }
+   ],
+   "surfaces": [
+    {
+     "kind": "cone",
+     "origin": [
+      0,
+      0,
+      0
+     ],
+     "axis": [
+      0,
+      0,
+      1
+     ],
+     "radius": 50.0,
+     "semiAngleDeg": -26.56505117707799
+    },
+    {
+     "kind": "cone",
+     "origin": [
+      0,
+      0,
+      0
+     ],
+     "axis": [
+      0,
+      0,
+      1
+     ],
+     "radius": 48.32294901687516,
+     "semiAngleDeg": -26.56505117707799
+    },
+    {
+     "kind": "plane",
+     "origin": [
+      0,
+      0,
+      40.0
+     ],
+     "normal": [
+      0,
+      0,
+      1
+     ]
+    },
+    {
+     "kind": "plane",
+     "origin": [
+      0,
+      0,
+      0
+     ],
+     "normal": [
+      0,
+      0,
+      -1
+     ]
+    }
+   ],
+   "faces": [
+    {
+     "featureId": "Shell",
+     "loops": [
+      [
+       {
+        "edge": 0,
+        "forward": true
+       },
+       {
+        "edge": 1,
+        "forward": true
+       },
+       {
+        "edge": 0,
+        "forward": false
+       },
+       {
+        "edge": 2,
+        "forward": true
+       }
+      ]
+     ],
+     "role": "outerSkin",
+     "sameSense": true,
+     "surface": 0,
+     "zoneId": "Shell"
+    },
+    {
+     "featureId": "Shell",
+     "loops": [
+      [
+       {
+        "edge": 3,
+        "forward": true
+       },
+       {
+        "edge": 4,
+        "forward": true
+       },
+       {
+        "edge": 5,
+        "forward": true
+       },
+       {
+        "edge": 4,
+        "forward": false
+       }
+      ]
+     ],
+     "role": "innerSkin",
+     "sameSense": false,
+     "surface": 1,
+     "zoneId": "Shell"
+    },
+    {
+     "featureId": "Shell",
+     "loops": [
+      [
+       {
+        "edge": 1,
+        "forward": false
+       }
+      ],
+      [
+       {
+        "edge": 5,
+        "forward": false
+       }
+      ]
+     ],
+     "role": "wall",
+     "sameSense": true,
+     "surface": 2,
+     "zoneId": "Shell"
+    },
+    {
+     "featureId": "Shell",
+     "loops": [
+      [
+       {
+        "edge": 2,
+        "forward": false
+       }
+      ],
+      [
+       {
+        "edge": 3,
+        "forward": false
+       }
+      ]
+     ],
+     "role": "wall",
+     "sameSense": true,
+     "surface": 3,
+     "zoneId": "Shell"
+    }
+   ]
+  }
+ ],
+ "parts": [
+  {
+   "id": "Shell",
+   "material": "304",
+   "matrix": [
+    [
+     1,
+     0,
+     0
+    ],
+    [
+     0,
+     1,
+     0
+    ],
+    [
+     0,
+     0,
+     1
+    ]
+   ],
+   "position": [
+    0,
+    0,
+    0
+   ],
+   "rotation": [
+    0,
+    0,
+    0
+   ],
+   "solid": "solid-0",
+   "thickness": 1.5
+  }
+ ]
+}
