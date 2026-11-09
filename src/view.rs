@@ -53,6 +53,40 @@ pub struct Solid {
     /// the view is flat). The DXF writer draws them on the BEND layer.
     #[serde(default)]
     pub bends: Vec<Bend>,
+    /// The milled pockets, blind holes and countersinks of a sheet. The
+    /// DXF writer draws their openings on the MILL layers, not as cuts.
+    #[serde(default)]
+    pub mills: Vec<Mill>,
+}
+
+/// One milled pocket, blind hole or countersunk hole of a sheet: which
+/// skin loop is its opening and, for a through mill, which loop on the
+/// other skin the laser cuts.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mill {
+    #[serde(default)]
+    pub id: String,
+    /// `outer` or `inner`: the skin the tool enters.
+    pub entry: String,
+    #[serde(default)]
+    pub through: bool,
+    #[serde(default)]
+    pub depth: f64,
+    #[serde(default)]
+    pub countersink: Option<MillCountersink>,
+    /// `[face, loop]`: the opening in the entry skin.
+    pub opening: [usize; 2],
+    /// `[face, loop]`: where a through mill leaves the other skin.
+    #[serde(default)]
+    pub exit: Option<[usize; 2]>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MillCountersink {
+    pub angle_deg: f64,
+    pub diameter: f64,
 }
 
 /// One brake bend on a flat blank: the centre line of its bend zone on the

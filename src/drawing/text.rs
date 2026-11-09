@@ -140,6 +140,32 @@ const LABELS: &[(&str, [&str; 3])] = &[
         ],
     ),
     (
+        "mill_note",
+        [
+            "Frezingen: DXF-laag MILL (buitenzijde) en MILL_BACK (binnenzijde), niet snijden.",
+            "Milling: DXF layers MILL (outer side) and MILL_BACK (inner side), not cut.",
+            "Fraisages : calques DXF MILL (face extérieure) et MILL_BACK (face intérieure), ne pas découper.",
+        ],
+    ),
+    (
+        "mill_countersink",
+        [
+            "{n}× verzinking ⌀{d} × {a}°, {side}",
+            "{n}× countersink ⌀{d} × {a}°, {side}",
+            "{n}× fraisure ⌀{d} × {a}°, {side}",
+        ],
+    ),
+    (
+        "mill_pocket",
+        [
+            "{n}× kamer of blind gat, diepte {depth}, {side}",
+            "{n}× pocket or blind hole, depth {depth}, {side}",
+            "{n}× poche ou trou borgne, profondeur {depth}, {side}",
+        ],
+    ),
+    ("side_outer", ["buitenzijde", "outer side", "face extérieure"]),
+    ("side_inner", ["binnenzijde", "inner side", "face intérieure"]),
+    (
         "curve_note",
         [
             "Vrije vorm: alleen eind- en uiterste punten bemaat, verloop volgens DXF.",

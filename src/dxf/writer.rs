@@ -8,6 +8,11 @@ use super::blank::{Blank, Seg, P2};
 pub const LAYER_CUT: &str = "CUT";
 pub const LAYER_BEND: &str = "BEND";
 pub const LAYER_ENGRAVE: &str = "ENGRAVE";
+/// Openings of pockets, blind holes and countersinks milled from the side
+/// the drawing shows (the outer skin): not cut.
+pub const LAYER_MILL: &str = "MILL";
+/// The same, milled from the back (the inner skin).
+pub const LAYER_MILL_BACK: &str = "MILL_BACK";
 
 /// A number as DXF writes it: nine decimals (an arc of a few metres'
 /// radius still meets its neighbour within a micron), trailing zeros
@@ -101,12 +106,14 @@ pub fn write(blank: &Blank) -> String {
     d.pair(0, "ENDTAB");
     d.pair(0, "TABLE");
     d.pair(2, "LAYER");
-    d.pair(70, "4");
+    d.pair(70, "6");
     for (name, colour, ltype) in [
         ("0", 7, "CONTINUOUS"),
         (LAYER_CUT, 7, "CONTINUOUS"),
         (LAYER_BEND, 1, "DASHED"),
         (LAYER_ENGRAVE, 3, "CONTINUOUS"),
+        (LAYER_MILL, 4, "CONTINUOUS"),
+        (LAYER_MILL_BACK, 6, "DASHED"),
     ] {
         d.pair(0, "LAYER");
         d.pair(2, name);
@@ -119,11 +126,16 @@ pub fn write(blank: &Blank) -> String {
 
     d.pair(0, "SECTION");
     d.pair(2, "ENTITIES");
-    for s in blank.loops.iter().flatten() {
+    let cut = blank.loops.iter().flatten().map(|s| (LAYER_CUT, s));
+    let mills = blank.mills.iter().flat_map(|m| {
+        let layer = if m.inner { LAYER_MILL_BACK } else { LAYER_MILL };
+        m.segs.iter().map(move |s| (layer, s))
+    });
+    for (layer, s) in cut.chain(mills) {
         match *s {
-            Seg::Line { a, b } => d.line(LAYER_CUT, a, b),
-            Seg::Arc { c, r, start, end } => d.arc(LAYER_CUT, c, r, start, end),
-            Seg::Circle { c, r } => d.circle(LAYER_CUT, c, r),
+            Seg::Line { a, b } => d.line(layer, a, b),
+            Seg::Arc { c, r, start, end } => d.arc(layer, c, r, start, end),
+            Seg::Circle { c, r } => d.circle(layer, c, r),
         }
     }
     for b in &blank.bends {

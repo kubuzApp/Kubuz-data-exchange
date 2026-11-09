@@ -272,6 +272,7 @@ fn notes(blank: &Blank, f: &Features, info: &SheetInfo, lang: Lang, sections: bo
     if !f.curves.is_empty() {
         v.push(lang.t("curve_note").to_string());
     }
+    v.extend(mill_notes(blank, lang));
     if blank.bends.is_empty() {
         v.push(lang.t("no_bends").to_string());
     } else {
@@ -288,6 +289,40 @@ fn notes(blank: &Blank, f: &Features, info: &SheetInfo, lang: Lang, sections: bo
         ));
     }
     v.push(format!("DXF: {}.dxf", info.part_ids[0]));
+    v
+}
+
+/// One line per kind of mill on the blank (countersinks by size and
+/// side, pockets and blind holes by depth and side), then where the DXF
+/// keeps their outlines. Nothing when the blank has none.
+fn mill_notes(blank: &Blank, lang: Lang) -> Vec<String> {
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    for m in &blank.mills {
+        let side = lang.t(if m.inner { "side_inner" } else { "side_outer" });
+        let line = match m.countersink {
+            Some((angle, d)) => lang
+                .t("mill_countersink")
+                .replace("{d}", &text::mm(d))
+                .replace("{a}", &text::mm(angle))
+                .replace("{side}", side),
+            None => lang
+                .t("mill_pocket")
+                .replace("{depth}", &text::mm(m.depth))
+                .replace("{side}", side),
+        };
+        match kinds.iter_mut().find(|(k, _)| *k == line) {
+            Some((_, n)) => *n += 1,
+            None => kinds.push((line, 1)),
+        }
+    }
+    if kinds.is_empty() {
+        return Vec::new();
+    }
+    let mut v: Vec<String> = kinds
+        .into_iter()
+        .map(|(k, n)| format!("{}.", k.replace("{n}", &n.to_string())))
+        .collect();
+    v.push(lang.t("mill_note").to_string());
     v
 }
 
@@ -753,6 +788,18 @@ pub fn sheet(
     let pm = |pt: P2| [o[0] + pt[0] * s, o[1] + pt[1] * s];
     for lp in &f.loops {
         draw_loop(&mut c, lp, &pm, s);
+    }
+    // Mill openings, narrow: solid from the outer skin, dashed from the
+    // inner one. They are not cut.
+    c.width(NARROW);
+    for m in &blank.mills {
+        if m.inner {
+            c.dash(&[3.0, 1.5], 0.0);
+        }
+        draw_loop(&mut c, &m.segs, &pm, s);
+        if m.inner {
+            c.solid();
+        }
     }
     // Dimensions, callouts, bend lines, notes and tags, narrow.
     dims::draw(&p.layout, &f, &mut c, o);

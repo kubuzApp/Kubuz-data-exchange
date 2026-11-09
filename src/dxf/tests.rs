@@ -252,3 +252,30 @@ fn numbers_are_short_and_never_negative_zero() {
     assert_eq!(num(1000.0), "1000");
     assert_eq!(num(1.6493361431346414), "1.649336143");
 }
+
+/// A mill is drawn on MILL (from the outer skin) or MILL_BACK (from the
+/// inner skin), never cut; a countersunk through hole cuts its bore.
+#[test]
+fn mills_go_on_their_own_layers_and_only_bores_are_cut() {
+    let out = export("mill_plate_flat");
+    assert_eq!(out.files.len(), 1);
+    let f = &out.files[0];
+    let ents = entities(&f.dxf);
+    let on = |layer: &str| ents.iter().filter(|(_, l)| l == layer).count();
+    // Two countersinks and a blind hole from the outer skin, four quarter
+    // arcs each; from the inner skin a countersink (four arcs) and a
+    // rounded pocket (four arcs, four lines).
+    assert_eq!(on("MILL"), 12);
+    assert_eq!(on("MILL_BACK"), 12);
+    // Outline, bolt, and the bores of the three countersunk holes.
+    let blank = flat_blank(&view("mill_plate_flat").solids[0], false, 1.0).unwrap();
+    assert_eq!(blank.loops.len(), 1 + 1 + 3);
+    assert_eq!(blank.mills.len(), 5);
+    assert_eq!(f.mills.len(), 5);
+    let cs: Vec<_> = f.mills.iter().filter(|m| m.countersink.is_some()).collect();
+    assert_eq!(cs.len(), 3);
+    assert!(cs.iter().all(|m| m.through));
+    let json = out.to_json();
+    let mills = json["files"][0]["mills"].as_array().unwrap();
+    assert_eq!(mills[0]["countersink"]["angleDeg"], 90.0);
+}
