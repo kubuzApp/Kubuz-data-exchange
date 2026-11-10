@@ -352,6 +352,32 @@ pub fn front_basis(solid: &Solid, a: &Analysis) -> Basis {
     } else {
         a.rolls[0].1
     };
+    // Facets meeting at sharp folds (a faceted transition): no facet is
+    // square to the part, so look along the world axis nearest the base
+    // facet, with the longest world axis across to the right.
+    if faceted(a) {
+        let k = (0..3)
+            .max_by(|i, j| d[*i].abs().total_cmp(&d[*j].abs()))
+            .unwrap();
+        let mut dw = [0.0; 3];
+        dw[k] = d[k].signum();
+        let extent = |i: usize| {
+            let (lo, hi) = solid
+                .vertices
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                    (lo.min(p[i]), hi.max(p[i]))
+                });
+            hi - lo
+        };
+        let rk = (0..3)
+            .filter(|i| *i != k)
+            .max_by(|i, j| extent(*i).total_cmp(&extent(*j)))
+            .unwrap();
+        let mut rw = [0.0; 3];
+        rw[rk] = 1.0;
+        return Basis::new(dw, rw);
+    }
     let mut candidates: Vec<(P3, usize)> = Vec::new();
     let push = |v: P3, w: usize, cands: &mut Vec<(P3, usize)>| {
         let v = sub(v, mul(d, dot(v, d)));
@@ -403,6 +429,36 @@ pub fn front_basis(solid: &Solid, a: &Analysis) -> Basis {
         r = mul(r, -1.0);
     }
     Basis::new(d, r)
+}
+
+/// Facets meeting at sharp folds, with no bend between them: a faceted
+/// transition.
+fn faceted(a: &Analysis) -> bool {
+    a.bends.is_empty() && a.rolls.is_empty() && a.flanges.len() > 2
+}
+
+/// Consecutive outline lines that turn by less than [`STRAIGHT_DEG`] made
+/// one line. A faceted transition's rim, seen edge-on, is a row of facet
+/// ends tilted by its thickness: a fraction of a millimetre, no corner a
+/// workshop measures.
+fn straighten(lp: Vec<Seg>) -> Vec<Seg> {
+    const STRAIGHT_DEG: f64 = 3.0;
+    let dir = |a: P2, b: P2| (b[1] - a[1]).atan2(b[0] - a[0]);
+    let mut out: Vec<Seg> = Vec::new();
+    for s in lp {
+        if let (Some(Seg::Line { a: pa, b: pb }), Seg::Line { a: _, b }) = (out.last().copied(), s)
+        {
+            let turn = (dir(pa, pb) - dir(pb, b) + std::f64::consts::PI)
+                .rem_euclid(std::f64::consts::TAU)
+                - std::f64::consts::PI;
+            if turn.abs().to_degrees() < STRAIGHT_DEG {
+                *out.last_mut().unwrap() = Seg::Line { a: pa, b };
+                continue;
+            }
+        }
+        out.push(s);
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -874,7 +930,10 @@ fn plan_views(
         // The blank the features come from: the outline, then the holes
         // of every skin face that faces the viewer and is seen.
         let mut loops: Vec<Vec<Seg>> = Vec::new();
-        let outline: Vec<Seg> = proj.outline.iter().map(shift_seg).collect();
+        let mut outline: Vec<Seg> = proj.outline.iter().map(shift_seg).collect();
+        if faceted(a) {
+            outline = straighten(outline);
+        }
         if outline.len() >= 3 || matches!(outline.as_slice(), [Seg::Circle { .. }]) {
             loops.push(outline);
         } else {
@@ -1265,7 +1324,10 @@ fn plan_views(
             Seg::Circle { c, r } => Seg::Circle { c: shift(c), r },
         };
         let mut loops: Vec<Vec<Seg>> = Vec::new();
-        let outline: Vec<Seg> = proj.outline.iter().map(shift_seg).collect();
+        let mut outline: Vec<Seg> = proj.outline.iter().map(shift_seg).collect();
+        if faceted(a) {
+            outline = straighten(outline);
+        }
         if outline.len() >= 3 || matches!(outline.as_slice(), [Seg::Circle { .. }]) {
             loops.push(outline);
         } else {

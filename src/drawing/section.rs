@@ -1357,8 +1357,13 @@ pub struct Fold {
 
 /// The folded part's extents along the base flange's axes (L, W, H).
 /// `None` when the zones do not chain (a bend without a flange on each
-/// side).
+/// side), and for a faceted transition: its folds are sharp (no radius,
+/// no allowance) and fan out, so no facet is square to the part and the
+/// base flange's axes give no size a workshop would measure.
 pub fn folded_extents(blank: &Blank, t: f64) -> Option<[f64; 3]> {
+    if blank.bends.iter().any(is_sharp) {
+        return None;
+    }
     if blank.bends.is_empty() {
         // A flat plate: its blank and the thickness.
         return (t > 0.0).then_some([blank.max[0], blank.max[1], t]);
@@ -1479,7 +1484,9 @@ pub fn fold(blank: &Blank, t: f64) -> Option<Fold> {
             let d = [1.0, 0.0];
             let m = [0.0, -1.0];
             let turn = if up { b.angle_deg } else { -b.angle_deg };
-            let (centre, r_skin) = if up {
+            let (centre, r_skin) = if up || is_sharp(b) {
+                // A sharp fold turns about the outer skin, as the kernel
+                // folds a facet.
                 (add(n0, m, -b.inside_radius), b.inside_radius)
             } else {
                 (add(n0, m, b.inside_radius + t), b.inside_radius + t)
@@ -1538,6 +1545,11 @@ pub fn fold(blank: &Blank, t: f64) -> Option<Fold> {
         bends: arcs,
         flanges,
     })
+}
+
+/// A fold between two facets: no inside radius and no allowance.
+pub fn is_sharp(b: &BendLine) -> bool {
+    b.inside_radius == 0.0 && b.allowance == 0.0
 }
 
 fn centroid(poly: &[P2]) -> P2 {

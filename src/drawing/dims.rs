@@ -137,6 +137,8 @@ pub struct Tag {
     pub u: P2,
     /// The note along the line, when it fits: text, paper start, angle.
     pub note: Option<(String, P2, f64)>,
+    /// Whether the circle is drawn: a fan's inner folds go without.
+    pub shown: bool,
 }
 
 /// The angle of a pitch circle's first hole from +x: the arc's paper
@@ -590,7 +592,9 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
     // somewhere along the line where it meets the least. The sections
     // give the distances between bends.
     for (j, b) in blank_bends.iter().enumerate() {
-        if !oblique[j] {
+        // A transition's fold lines fan out from its corners; a fold with no
+        // radius and no allowance has no press-brake stop to give.
+        if !oblique[j] || super::section::is_sharp(b) {
             continue;
         }
         let e = bend_dir(b);
@@ -1087,22 +1091,92 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
     let mut right: Vec<usize> = Vec::new();
     let mut top: Vec<usize> = Vec::new();
     let mut tags = Vec::new();
+    let mut sharp_tag = Vec::new();
+    // A transition's sharp folds fan out from an outline corner. Their
+    // tags go on past that corner, outside the part, each on its own ray
+    // and far enough out that the rays lie a tag apart.
+    let end_key = |p: P2| ((p[0] * 1e3).round() as i64, (p[1] * 1e3).round() as i64);
+    let mut rays: std::collections::HashMap<(i64, i64), Vec<f64>> = Default::default();
+    for (bi, b) in f.bends.iter().enumerate() {
+        if blank_bends.get(bi).is_some_and(super::section::is_sharp) {
+            rays.entry(end_key(b.a))
+                .or_default()
+                .push((b.a[1] - b.b[1]).atan2(b.a[0] - b.b[0]));
+            rays.entry(end_key(b.b))
+                .or_default()
+                .push((b.b[1] - b.a[1]).atan2(b.b[0] - b.a[0]));
+        }
+    }
+    let fan = |p: P2| rays.get(&end_key(p)).map_or(0, Vec::len);
+    // A fan's folds are numbered one after the other round its corner:
+    // only the first and the last get a tag, the operator counts the lines
+    // between them. Any other numbering tags every line.
+    let mut untagged = vec![false; f.bends.len()];
+    {
+        use std::f64::consts::{PI, TAU};
+        let mut at_corner: std::collections::HashMap<(i64, i64), Vec<(usize, f64)>> =
+            Default::default();
+        for (bi, b) in f.bends.iter().enumerate() {
+            if !blank_bends.get(bi).is_some_and(super::section::is_sharp) {
+                continue;
+            }
+            let (far, near) = if fan(b.a) > fan(b.b) {
+                (b.a, b.b)
+            } else {
+                (b.b, b.a)
+            };
+            let ang = (far[1] - near[1]).atan2(far[0] - near[0]);
+            at_corner.entry(end_key(far)).or_default().push((bi, ang));
+        }
+        for list in at_corner.values_mut() {
+            let (sx, sy) = list
+                .iter()
+                .fold((0.0, 0.0), |(x, y), (_, a)| (x + a.cos(), y + a.sin()));
+            let back = sy.atan2(sx) + PI;
+            list.sort_by(|x, y| {
+                (x.1 - back)
+                    .rem_euclid(TAU)
+                    .total_cmp(&(y.1 - back).rem_euclid(TAU))
+            });
+            let nrs: Vec<i64> = list.iter().map(|(bi, _)| f.bends[*bi].nr as i64).collect();
+            let run = nrs.windows(2).all(|w| w[1] - w[0] == 1)
+                || nrs.windows(2).all(|w| w[0] - w[1] == 1);
+            if nrs.len() > 2 && run {
+                for (bi, _) in &list[1..list.len() - 1] {
+                    untagged[*bi] = true;
+                }
+            }
+        }
+    }
     for (bi, b) in f.bends.iter().enumerate() {
         let (a, e) = ([b.a[0] * s, b.a[1] * s], [b.b[0] * s, b.b[1] * s]);
         let d = [e[0] - a[0], e[1] - a[1]];
         let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
         let u = [d[0] / l, d[1] / l];
         let horizontal = u[1].abs() < 1e-6;
-        // The far end: right for a horizontal line, top otherwise.
-        let far_first = if horizontal { a[0] > e[0] } else { a[1] > e[1] };
+        let sharp = blank_bends.get(bi).is_some_and(super::section::is_sharp);
+        // The far end: right for a horizontal line, top otherwise; for a
+        // sharp fold, the corner the most folds fan out from.
+        let far_first = if sharp {
+            fan(b.a) > fan(b.b)
+        } else if horizontal {
+            a[0] > e[0]
+        } else {
+            a[1] > e[1]
+        };
         let (near_end, far_end, u) = if far_first {
             (e, a, [-u[0], -u[1]])
         } else {
             (a, e, u)
         };
-        let line = [add(near_end, u, -OVERSHOOT), add(far_end, u, OVERSHOOT)];
-        let at = add(far_end, u, OVERSHOOT + 1.5 + TAG_R);
-        if horizontal {
+        let near_over = if sharp { 0.0 } else { OVERSHOOT };
+        let out = OVERSHOOT + 1.5 + TAG_R;
+        let line = [add(near_end, u, -near_over), add(far_end, u, OVERSHOOT)];
+        let at = add(far_end, u, out);
+        sharp_tag.push(sharp);
+        if sharp {
+            // Spread along their own lines below, not in a row.
+        } else if horizontal {
             right.push(tags.len());
         } else {
             top.push(tags.len());
@@ -1147,6 +1221,7 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
             at,
             u,
             note,
+            shown: !untagged[bi],
         });
     }
     spread(&mut tags, &right, 1);
@@ -1158,10 +1233,16 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
     for _ in 0..40 {
         let mut moved = false;
         for i in 0..tags.len() {
+            if !tags[i].shown {
+                continue;
+            }
             let at = tags[i].at;
             let u = tags[i].u;
             let leader = [tags[i].line[1], add(at, u, -TAG_R)];
-            if !flipped[i] && boxes.iter().any(|b| crosses_box(leader[0], leader[1], *b)) {
+            if !flipped[i]
+                && !sharp_tag[i]
+                && boxes.iter().any(|b| crosses_box(leader[0], leader[1], *b))
+            {
                 flipped[i] = true;
                 tags[i].u = [-u[0], -u[1]];
                 tags[i].line.swap(0, 1);
@@ -1169,7 +1250,8 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
                 moved = true;
                 continue;
             }
-            let hit = (0..tags.len()).any(|j| j != i && dist(at, tags[j].at) < 2.0 * TAG_R + 0.5)
+            let hit = (0..tags.len())
+                .any(|j| j != i && tags[j].shown && dist(at, tags[j].at) < 2.0 * TAG_R + 0.5)
                 || boxes.iter().any(|b| {
                     overlap(
                         *b,
@@ -1187,13 +1269,16 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         }
     }
     for t in &tags {
+        lines.push(t.line);
+        if !t.shown {
+            continue;
+        }
         boxes.push([
             t.at[0] - TAG_R,
             t.at[1] - TAG_R,
             t.at[0] + TAG_R,
             t.at[1] + TAG_R,
         ]);
-        lines.push(t.line);
         lines.push([t.line[1], add(t.at, t.u, -TAG_R)]);
     }
     for ch in &chains {
@@ -1227,7 +1312,9 @@ pub fn layout(f: &Features, blank_bends: &[BendLine], s: f64, lang: Lang) -> Lay
         grow(&mut ext, [b[2], b[3]], 0.5);
     }
     for t in &tags {
-        grow(&mut ext, t.at, TAG_R + 0.5);
+        if t.shown {
+            grow(&mut ext, t.at, TAG_R + 0.5);
+        }
         grow(&mut ext, t.line[0], 0.5);
         grow(&mut ext, t.line[1], 0.5);
     }
@@ -1973,6 +2060,9 @@ pub fn draw(lo: &Layout, f: &Features, c: &mut Content, o: P2) {
         c.line(pp(t.line[0]), pp(t.line[1]));
         if let Some((note, at, angle)) = &t.note {
             c.text(pp(*at), H, *angle, note);
+        }
+        if !t.shown {
+            continue;
         }
         let at = pp(t.at);
         let far = pp(t.line[1]);

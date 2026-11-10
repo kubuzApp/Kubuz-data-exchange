@@ -227,12 +227,34 @@ pub struct Plan {
     pub iso_lines: Option<super::iso::Iso>,
 }
 
-fn table_h(bends: usize) -> f64 {
+/// Most rows in one column of the bend table. A faceted transition has
+/// dozens of fold lines; their table runs on in columns side by side.
+const TABLE_MAX_ROWS: usize = 14;
+const TABLE_GAP: f64 = 2.0;
+/// The notes keep at least this much of the info strip beside the table.
+const MIN_NOTE_W: f64 = 60.0;
+
+/// Columns and rows per column of the bend table on a sheet whose info
+/// strip is `strip_w` wide: as many columns as leave the notes their room.
+fn table_grid(bends: usize, strip_w: f64) -> (usize, usize) {
+    let col_w: f64 = TABLE_COLS.iter().sum();
+    let fit =
+        (((strip_w - 6.0 - MIN_NOTE_W + TABLE_GAP) / (col_w + TABLE_GAP)).floor() as usize).max(1);
+    let cols = bends.div_ceil(TABLE_MAX_ROWS).clamp(1, fit);
+    (cols, bends.div_ceil(cols))
+}
+
+fn table_h(bends: usize, strip_w: f64) -> f64 {
     if bends == 0 {
         0.0
     } else {
-        TABLE_ROW * (bends as f64 + 1.0) + 1.0
+        TABLE_ROW * (table_grid(bends, strip_w).1 as f64 + 1.0) + 1.0
     }
+}
+
+fn table_w(bends: usize, strip_w: f64) -> f64 {
+    let cols = table_grid(bends, strip_w).0 as f64;
+    TABLE_COLS.iter().sum::<f64>() * cols + TABLE_GAP * (cols - 1.0).max(0.0)
 }
 
 fn notes(blank: &Blank, f: &Features, info: &SheetInfo, lang: Lang, sections: bool) -> Vec<String> {
@@ -335,11 +357,14 @@ pub fn plan(
     note_lines: usize,
     lang: Lang,
 ) -> Result<Plan, String> {
-    let info_h = table_h(blank.bends.len()).max(note_lines as f64 * NOTE_PITCH + 2.0);
+    let info_h_on = |paper: Paper| {
+        table_h(blank.bends.len(), paper.info_strip().2).max(note_lines as f64 * NOTE_PITCH + 2.0)
+    };
     let iso = super::iso::isometric(blank, t);
     let mut best: Option<(f64, Plan)> = None;
     for s in SCALES {
         for paper in Paper::ALL {
+            let info_h = info_h_on(paper);
             let lo = dims::layout(f, &blank.bends, s, lang);
             let [x0, y0, x1, y1] = paper.view_area(info_h);
             let need_w = f.max[0] * s + lo.margin[0] + lo.margin[2];
@@ -703,8 +728,10 @@ pub fn sheet(
 
     // Notes bottom left, the bend table beside them on the same baseline.
     let (sx, sy, sw) = paper.info_strip();
-    let th = table_h(blank.bends.len());
-    let tw: f64 = TABLE_COLS.iter().sum();
+    let th = table_h(blank.bends.len(), sw);
+    let tw = table_w(blank.bends.len(), sw);
+    let col_w: f64 = TABLE_COLS.iter().sum();
+    let (_, rows) = table_grid(blank.bends.len(), sw);
     let note_w = if th > 0.0 { sw - tw - 6.0 } else { sw };
     let mut y = sy + 1.0 + (note_lines.len() as f64 - 1.0) * NOTE_PITCH + 0.5;
     for line in &note_lines {
@@ -730,42 +757,45 @@ pub fn sheet(
         });
     }
     if th > 0.0 {
-        let tx = sx + note_w + 6.0;
         let ty = sy + 1.0;
         c.width(NARROW);
-        c.rect_stroke(tx, ty, tw, th - 1.0);
         let heads = ["bend", "direction", "angle", "inside_r", "allowance"];
-        let mut row_y = ty + th - 1.0 - TABLE_ROW;
-        let mut x = tx;
-        c.line([tx, row_y], [tx + tw, row_y]);
-        for (i, k) in heads.iter().enumerate() {
-            let (tt, h) = sheet::shrink_to(lang.t(k), 2.5, TABLE_COLS[i] - 1.5);
-            c.text([x + 0.8, row_y + 1.5], h, 0.0, &tt);
-            x += TABLE_COLS[i];
-            if i + 1 < heads.len() {
-                c.line([x, ty], [x, ty + th - 1.0]);
-            }
-        }
-        for (i, b) in blank.bends.iter().enumerate() {
-            row_y -= TABLE_ROW;
-            if i + 1 < blank.bends.len() {
-                c.line([tx, row_y], [tx + tw, row_y]);
-            }
-            let dir = match b.direction {
-                crate::view::BendDirection::Up => lang.t("up"),
-                crate::view::BendDirection::Down => lang.t("down"),
-            };
-            let cells = [
-                (i + 1).to_string(),
-                dir.to_string(),
-                text::deg(b.angle_deg),
-                text::mm(b.inside_radius),
-                text::mm(b.allowance),
-            ];
+        for (ci, chunk) in blank.bends.chunks(rows.max(1)).enumerate() {
+            let tx = sx + note_w + 6.0 + ci as f64 * (col_w + TABLE_GAP);
+            c.rect_stroke(tx, ty, col_w, th - 1.0);
+            let mut row_y = ty + th - 1.0 - TABLE_ROW;
             let mut x = tx;
-            for (j, tt) in cells.iter().enumerate() {
-                c.text([x + 0.8, row_y + 1.5], 2.5, 0.0, tt);
-                x += TABLE_COLS[j];
+            c.line([tx, row_y], [tx + col_w, row_y]);
+            for (i, k) in heads.iter().enumerate() {
+                let (tt, h) = sheet::shrink_to(lang.t(k), 2.5, TABLE_COLS[i] - 1.5);
+                c.text([x + 0.8, row_y + 1.5], h, 0.0, &tt);
+                x += TABLE_COLS[i];
+                if i + 1 < heads.len() {
+                    c.line([x, ty], [x, ty + th - 1.0]);
+                }
+            }
+            for (k, b) in chunk.iter().enumerate() {
+                let i = ci * rows + k;
+                row_y -= TABLE_ROW;
+                if k + 1 < rows {
+                    c.line([tx, row_y], [tx + col_w, row_y]);
+                }
+                let dir = match b.direction {
+                    crate::view::BendDirection::Up => lang.t("up"),
+                    crate::view::BendDirection::Down => lang.t("down"),
+                };
+                let cells = [
+                    (i + 1).to_string(),
+                    dir.to_string(),
+                    text::deg(b.angle_deg),
+                    text::mm(b.inside_radius),
+                    text::mm(b.allowance),
+                ];
+                let mut x = tx;
+                for (j, tt) in cells.iter().enumerate() {
+                    c.text([x + 0.8, row_y + 1.5], 2.5, 0.0, tt);
+                    x += TABLE_COLS[j];
+                }
             }
         }
     }
