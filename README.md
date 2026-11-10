@@ -103,7 +103,8 @@ notes them by kind.
 What the drawing does not say about a bend comes back beside it: each file's
 `bends` lists, in the order of the lines, the bend's `id`, `angleDeg`,
 `direction` (`up` or `down`, seen from the outer skin) and `insideRadius`,
-for a job sheet. Parts that share a solid share one file; `partIds` lists
+for a job sheet. A faceted transition's folds are bends too, with inside
+radius 0. Parts that share a solid share one file; `partIds` lists
 them and `quantity` counts them. A part placed by a mirror image gets a mirrored
 blank of its own (the bend directions stay: the outer skin is the same
 skin), a uniform scale a scaled one. A part with no flat pattern (a
@@ -223,7 +224,13 @@ and the exporter puts on it what the drafter does:
   with the notes: angle (deviation from flat), direction (`OP` towards the
   viewer, `NEER` away: the view is the outer skin), inside radius and bend
   allowance; the V-opening is the press-brake operator's choice and is not
-  written;
+  written; a long table runs on in columns;
+- a **faceted transition**'s fold lines are sharp (inside radius and
+  allowance 0) and fan out from the corners of the outline, which sets
+  them out, so they get no dimension of their own; the folds of one fan are
+  numbered one after the other and only its first and last line carry a
+  tag; the folded size is left out of the notes, because no facet is
+  square to the part, and the folded drawing looks along the world axes;
 - **reliefs, notches and small rounds** on the outline are not dimensioned
   (the laser cuts them from the DXF) and the notes say so; a cutout is a
   feature at any size;

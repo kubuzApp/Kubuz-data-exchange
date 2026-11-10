@@ -15,6 +15,7 @@ fn every_flat_fixture_becomes_a_sheet() {
         "mixed_channel_flat",
         "deck_splash_flat",
         "curved_board_flat",
+        "transition_flat",
     ] {
         let out = write_drawings(&view(name), &Meta::default()).unwrap();
         assert!(!out.sheets.is_empty(), "{name}");
@@ -376,4 +377,22 @@ fn crosses(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
         (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
     };
     o(a, b, c) * o(a, b, d) < -1e-9 && o(c, d, a) * o(c, d, b) < -1e-9
+}
+
+/// A square-to-round's 39 fold lines: the bend table runs on in columns and
+/// no fold without a radius gets a press-brake stop.
+#[test]
+fn a_transition_flat_pattern_lists_every_fold() {
+    let out = write_drawings(&view("transition_flat"), &Meta::default()).unwrap();
+    let s = out.sheets.iter().find(|s| s.kind == "flat").unwrap();
+    assert_eq!(s.bends.len(), 39);
+    assert!(s
+        .bends
+        .iter()
+        .all(|b| b.inside_radius == 0.0 && b.allowance == 0.0));
+    assert!(
+        s.chains.iter().all(|c| c.kind != "bend"),
+        "{:?}",
+        s.chains.iter().map(|c| &c.kind).collect::<Vec<_>>()
+    );
 }

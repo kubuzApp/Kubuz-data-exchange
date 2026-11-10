@@ -940,9 +940,20 @@ def flat_problems(sheet, d, words, folded_solid, scale=1.0):
                 cy, pyy = next(steps) if ny > 1 else (1, 0.0)
                 want = [(first[0] + pxx * i, first[1] + pyy * j) for j in range(cy) for i in range(cx)]
                 reconstruct(label, want, centres, SAME + 0.005 * max(cx, cy))
+    by_nr = {b["nr"]: b for b in sheet["bends"]}
+    cut_ends = [p for seg in d["lines"] for p in seg]
     for nr, (a, b) in enumerate(d["bends"], 1):
         ln = math.dist(a, b)
         if ln < 1e-9:
+            continue
+        sb = by_nr.get(nr, {})
+        if sb.get("insideRadius") == 0 and sb.get("allowance") == 0:
+            # A transition's sharp fold runs from outline corner to outline
+            # corner: the outline sets it out, and it needs no dimension of
+            # its own. Both ends must be corners of the cut.
+            for end in (a, b):
+                if not any(math.dist(end, p) <= SAME for p in cut_ends):
+                    problems.append(f"sharp bend line {nr}: end ({end[0]:.1f}, {end[1]:.1f}) is no corner of the outline")
             continue
         n = ((b[1] - a[1]) / ln, -(b[0] - a[0]) / ln)
         hit = False
@@ -1065,7 +1076,9 @@ def flat_problems(sheet, d, words, folded_solid, scale=1.0):
     if folded_solid is not None:
         vs = folded_solid["vertices"]
         box = sorted(scale * (max(p[i] for p in vs) - min(p[i] for p in vs)) for i in range(3))
-        if ext is None:
+        if ext is None and sheet["bends"] and all(b["insideRadius"] == 0 and b["allowance"] == 0 for b in sheet["bends"]):
+            pass  # a faceted transition: no folded size along a facet (section::folded_extents)
+        elif ext is None:
             problems.append("no folded extents, the folded part is " + " × ".join(mm_text(x) for x in box))
         elif any(abs(a - b) > SAME for a, b in zip(sorted(ext), box)):
             problems.append(

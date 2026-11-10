@@ -279,3 +279,17 @@ fn mills_go_on_their_own_layers_and_only_bores_are_cut() {
     let mills = json["files"][0]["mills"].as_array().unwrap();
     assert_eq!(mills[0]["countersink"]["angleDeg"], 90.0);
 }
+
+/// A faceted transition's fold lines go on BEND, sharp: no radius, no
+/// allowance, all folding the same way.
+#[test]
+fn a_transition_draws_its_fold_lines_on_bend() {
+    let out = export("transition_flat");
+    assert_eq!(out.files.len(), 1);
+    let f = &out.files[0];
+    let ents = entities(&f.dxf);
+    assert_eq!(ents.iter().filter(|(_, l)| l == "BEND").count(), 39);
+    assert_eq!(f.bends.len(), 39);
+    assert!(f.bends.iter().all(|b| b.inside_radius == 0.0));
+    assert!(f.bends.iter().all(|b| b.direction == f.bends[0].direction));
+}
