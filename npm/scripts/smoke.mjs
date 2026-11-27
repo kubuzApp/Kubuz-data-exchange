@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const wasmDir = join(root, "wasm");
-const { default: init, exportDrawings, exportDxf, exportStep } = await import(
+const { default: init, exportDrawings, exportDxf, exportMesh, exportStep } = await import(
   pathToFileURL(join(wasmDir, "kubuz_data_exchange.js")).href
 );
 await init({ module_or_path: await readFile(join(wasmDir, "kubuz_data_exchange_bg.wasm")) });
@@ -48,4 +48,16 @@ if (pdfBytes.length > 40_000 || drawings.sheets[0].dimensions.length < 8 || draw
   console.error(`unexpected dossier: ${pdfBytes.length} bytes, ${drawings.sheets[0].dimensions.length} dimensions`);
   process.exit(1);
 }
-console.log(`ok: deck_splash, ${result.step.length} bytes, ${parts} parts; four_down_flat, ${dxf.files[0].dxf.length} bytes of DXF, ${pdfBytes.length} bytes of PDF`);
+const washers = await readFile(join(root, "..", "fixtures", "mesh_washers.view.json"), "utf8");
+const glb = JSON.parse(exportMesh(washers, JSON.stringify({ format: "glb", name: "washers" })));
+const glbBytes = glb.ok ? Buffer.from(glb.files[0].data, "base64") : Buffer.alloc(0);
+if (!glb.ok || glb.files[0].name !== "washers.glb" || glbBytes.subarray(0, 4).toString() !== "glTF") {
+  console.error(`unexpected glb result: ${JSON.stringify(glb).slice(0, 200)}`);
+  process.exit(1);
+}
+const obj = JSON.parse(exportMesh(washers, JSON.stringify({ format: "obj", name: "washers" })));
+if (!obj.ok || obj.files.map((f) => f.name).join(",") !== "washers.obj,washers.mtl") {
+  console.error(`unexpected obj result: ${JSON.stringify(obj).slice(0, 200)}`);
+  process.exit(1);
+}
+console.log(`ok: deck_splash, ${result.step.length} bytes, ${parts} parts; four_down_flat, ${dxf.files[0].dxf.length} bytes of DXF, ${pdfBytes.length} bytes of PDF; mesh_washers, ${glbBytes.length} bytes of GLB`);

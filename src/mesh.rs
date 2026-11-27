@@ -339,6 +339,7 @@ mod tests {
             triangles.push([base, base + 2, base + 3]);
         }
         Mesh {
+            normals: Vec::new(),
             vertices,
             triangles,
         }
@@ -398,6 +399,7 @@ mod tests {
         let s = mesh_to_brep(
             "washer",
             &Mesh {
+                normals: Vec::new(),
                 vertices,
                 triangles,
             },

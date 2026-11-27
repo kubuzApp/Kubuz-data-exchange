@@ -340,11 +340,30 @@ export type DrawingsResult =
     }
   | { ok: false; error: string };
 
+/** The mesh file formats: glTF 2.0 binary, binary STL, Wavefront OBJ with its MTL. */
+export type MeshFormat = "glb" | "stl" | "obj";
+
+export type MeshOptions = {
+  format: MeshFormat;
+  /** The file name without extension, and the GLB root node's name. Default "model". */
+  name?: string;
+  /** The language of the part and group names: `nl` (default), `en`, `fr`. */
+  lang?: string;
+};
+
+/** One written file; `data` is base64. OBJ gives two: the `.obj` and its `.mtl`. */
+export type MeshFile = { name: string; mime: string; data: string };
+
+export type MeshResult =
+  | { ok: true; files: MeshFile[]; skipped: { id: string; message: string }[] }
+  | { ok: false; error: string };
+
 type WasmModule = {
   default: (moduleOrPath?: unknown) => Promise<unknown>;
   exportStep: (viewJson: string, name: string) => string;
   exportDxf: (viewJson: string) => string;
   exportDrawings: (viewJson: string, metaJson: string) => string;
+  exportMesh: (viewJson: string, optionsJson: string) => string;
 };
 
 export type InitOptions = {
@@ -454,4 +473,25 @@ function base64ToBytes(b64: string): Uint8Array {
     if (have > 3) out[o++] = n & 255;
   }
   return out.subarray(0, o);
+}
+
+/**
+ * Write GLB, STL or OBJ from a view whose solids are closed triangle meshes
+ * (`{ id, mesh: { vertices, triangles, normals? } }`), for looking at,
+ * rendering and 3D printing, not for production. GLB is metres and Y up
+ * (its root node scales the millimetre meshes), one node per part under a
+ * node per group, equal parts share a mesh, one PBR material per `color`,
+ * `metalness` and `roughness` of the parts. STL is one merged body in
+ * millimetres, Z up. OBJ is millimetres, Y up, one object per part, with an
+ * MTL. An exact solid has no triangles and is listed under `skipped`, with
+ * the parts that use it.
+ */
+export async function exportMesh(
+  view: object | string,
+  options: MeshOptions,
+  init?: InitOptions,
+): Promise<MeshResult> {
+  const text = typeof view === "string" ? view : JSON.stringify(view);
+  const mod = await initDataExchange(init);
+  return JSON.parse(mod.exportMesh(text, JSON.stringify(options))) as MeshResult;
 }
