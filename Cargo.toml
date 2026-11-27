@@ -1,8 +1,8 @@
 [package]
 name = "kubuz-data-exchange"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
-description = "File formats (STEP AP214, DXF flat patterns, PDF drawings) from the Kubuz kernel's exact-geometry view"
+description = "File formats (STEP AP214, DXF flat patterns, PDF drawings, GLB, STL, OBJ) from the Kubuz kernel's exact-geometry view"
 license = "MIT"
 repository = "https://github.com/kubuzApp/Kubuz-data-exchange"
 

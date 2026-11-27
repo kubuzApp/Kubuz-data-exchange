@@ -69,6 +69,8 @@ pub fn write_step(view: &View, name: &str) -> Result<String, String> {
                 material: String::new(),
                 thickness: 0.0,
                 color: None,
+                metalness: None,
+                roughness: None,
                 position: [0.0; 3],
                 rotation: [0.0; 3],
                 matrix: None,

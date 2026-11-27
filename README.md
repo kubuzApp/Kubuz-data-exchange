@@ -346,6 +346,49 @@ cargo run --example view2pdf -- four_down_flat.view.json out.pdf meta.json
 
 In Rust: `kubuz_data_exchange::write_drawings_json(&view_json, &meta_json)`.
 
+## Mesh files: GLB, STL, OBJ
+
+`exportMesh(view, { format, name, lang })` writes a 3D model to look at,
+render or print, from the same view the STEP writer reads, but from triangles:
+a part's solid must be `mesh` (the kernel's viewer triangles, or a bought
+part's). A B-rep solid has no triangles and is left out under `skipped`.
+
+| Format | Units, axes | Structure | Materials |
+| --- | --- | --- | --- |
+| `glb` (glTF 2.0 binary) | metres, Y up (one root node: scale 0.001 and Z up to Y up) | a node per part, a group node per group of two or more parts; equal mesh and look share one mesh; `extras: {partId, material, thickness}` | PBR metallic-roughness per colour, metalness and roughness |
+| `stl` (binary) | millimetres, Z up | every part in one triangle soup | none |
+| `obj` + `.mtl` | millimetres, Y up | `o` per part, named as the part in `lang` | `Kd`, `Ks`, `Ns`, `Pm`, `Pr` per look |
+
+A part's `metalness` and `roughness` (0 to 1) default to brushed steel
+(1.0, 0.45), its colour to light grey. The answer is
+`{ ok, files: [{ name, mime, data (base64) }], skipped }`; a name with `/` or
+`\` is refused.
+
+The kernel's viewer triangles are not welded at the bend seams (T-junctions),
+so a folded part is not a closed shell: a slicer repairs that for printing.
+
+From the command line:
+
+```
+cargo run --example view2mesh -- mesh_washers.view.json glb out/ [name] [lang]
+```
+
+In Rust: `kubuz_data_exchange::write_mesh_json(&view_json, &options_json)`.
+
+The mesh judge reads every file back with trimesh and the Khronos glTF
+validator, against the view: bounds to 0.01 mm, closed bodies stay closed and
+outward, one node or object per part, one material per look:
+
+```
+pip install trimesh==4.6.8 numpy networkx==3.4.2
+npm install gltf-validator@2.0.0-dev.3.10
+python -I judge/judge_mesh.py --views fixtures --gltf-validator node_modules out/mesh/*
+```
+
+`kernelmesh_multi_plate` and `kernelmesh_balustrade` are real captures of the
+CPQ's kernel triangles; CI writes and judges all three formats for them and
+for `mesh_*`.
+
 ## The view
 
 One JSON document. Units are millimetres.

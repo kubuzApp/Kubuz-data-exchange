@@ -42,12 +42,15 @@ jobs:
           java-version: "17"
       - name: Fetch veraPDF
         run: curl -sSfL -o verapdf.jar https://repo1.maven.org/maven2/org/verapdf/apps/greenfield-apps/1.28.2/greenfield-apps-1.28.2.jar
-      - run: cargo build --release --example view2step --example view2dxf --example view2pdf
+      - run: cargo build --release --example view2step --example view2dxf --example view2pdf --example view2mesh
       - name: Write and judge every fixture
         run: |
           mkdir -p out
           for v in fixtures/*.view.json; do
             n=$(basename "$v" .view.json)
+            # The kernel's viewer triangles are for the mesh files only:
+            # they are not welded at the bend seams, so not a closed shell.
+            case "$n" in kernelmesh_*) continue;; esac
             target/release/examples/view2step "$v" "out/$n.step" "$n"
           done
           python -I judge/judge.py out/*.step
@@ -58,7 +61,7 @@ jobs:
         run: |
           for v in fixtures/*.view.json; do
             n=$(basename "$v" .view.json)
-            case "$n" in mesh_*) continue;; esac
+            case "$n" in mesh_*|kernelmesh_*) continue;; esac
             if ! target/release/examples/view2dxf "$v" "out/dxf/$n"; then
               case "$n" in *_flat*) exit 1;; esac
             fi
@@ -72,10 +75,20 @@ jobs:
           mkdir -p out/pdf
           for v in fixtures/*.view.json; do
             n=$(basename "$v" .view.json)
-            case "$n" in mesh_*|four_down_mirrored) continue;; esac
+            case "$n" in mesh_*|kernelmesh_*|four_down_mirrored) continue;; esac
             target/release/examples/view2pdf "$v" "out/pdf/$n.pdf"
           done
           python -I judge/judge_pdf.py --dxf out/dxf --views fixtures --verapdf verapdf.jar out/pdf/*.pdf
+      # The mesh fixtures as GLB, STL and OBJ, read back by trimesh and the
+      # Khronos glTF validator, against the view they came from.
+      - name: Write and judge every mesh file
+        run: |
+          pip install trimesh==4.6.8 networkx==3.4.2
+          npm install --no-save --prefix out/gv gltf-validator@2.0.0-dev.3.10
+          for v in fixtures/mesh_*.view.json fixtures/kernelmesh_*.view.json; do
+            for f in glb stl obj; do target/release/examples/view2mesh "$v" "$f" out/mesh; done
+          done
+          python -I judge/judge_mesh.py --views fixtures --gltf-validator out/gv/node_modules out/mesh/*
 
   package:
     name: Package

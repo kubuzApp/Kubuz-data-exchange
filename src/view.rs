@@ -133,6 +133,10 @@ impl BendDirection {
 pub struct Mesh {
     pub vertices: Vec<P3>,
     pub triangles: Vec<[usize; 3]>,
+    /// One unit normal per vertex, for the mesh file writers (GLB, OBJ):
+    /// a cylinder then shades smooth. The STEP writer ignores it.
+    #[serde(default)]
+    pub normals: Vec<P3>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -239,6 +243,13 @@ pub struct Part {
     /// adds it from its material library). Written as a STYLED_ITEM.
     #[serde(default)]
     pub color: Option<String>,
+    /// PBR metalness in 0..1 from the app's material library. Only the
+    /// GLB and OBJ writers read it.
+    #[serde(default)]
+    pub metalness: Option<f64>,
+    /// PBR roughness in 0..1, as `metalness`.
+    #[serde(default)]
+    pub roughness: Option<f64>,
     #[serde(default)]
     pub position: P3,
     /// Degrees, R = Rx · Ry · Rz. Used only when `matrix` is missing.
