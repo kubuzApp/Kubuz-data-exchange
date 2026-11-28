@@ -68,7 +68,7 @@ fn glb_is_a_valid_container_with_a_metre_y_up_root() {
 }
 
 #[test]
-fn glb_groups_names_and_shares_equal_parts() {
+fn glb_groups_names_and_gives_every_part_its_own_mesh() {
     let out = run(&three_cubes(), "glb");
     let (doc, _) = glb_json(&out.files[0].data);
     let nodes = doc["nodes"].as_array().unwrap();
@@ -80,7 +80,10 @@ fn glb_groups_names_and_shares_equal_parts() {
     assert_eq!(left["extras"]["material"], "RVS 304");
     assert!(left.get("matrix").is_none(), "identity is left out");
     let b = nodes.iter().find(|x| x["extras"]["partId"] == "b").unwrap();
-    assert_eq!(b["mesh"], left["mesh"], "same solid and look: one mesh");
+    assert_ne!(
+        b["mesh"], left["mesh"],
+        "equal parts keep their own mesh, to animate each one"
+    );
     let c = nodes.iter().find(|x| x["extras"]["partId"] == "c").unwrap();
     assert!(
         c["extras"].get("thickness").is_none(),
@@ -89,11 +92,18 @@ fn glb_groups_names_and_shares_equal_parts() {
     // Parts a and b share a group; c is alone in its own, so it has no node.
     assert_eq!(nodes.len(), 5, "root, group, three parts");
     assert_ne!(c["mesh"], left["mesh"], "mirrored: baked");
-    // Two looks, two meshes; no normals, so positions and indices for the
-    // shared geometry and for the baked one.
+    // Two looks; three parts, three meshes, each with its own positions and
+    // indices (no normals).
     assert_eq!(doc["materials"].as_array().unwrap().len(), 2);
-    assert_eq!(doc["meshes"].as_array().unwrap().len(), 2);
-    assert_eq!(doc["accessors"].as_array().unwrap().len(), 4);
+    assert_eq!(doc["meshes"].as_array().unwrap().len(), 3);
+    assert_eq!(doc["accessors"].as_array().unwrap().len(), 6);
+    let positions: Vec<&Value> = doc["meshes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| &m["primitives"][0]["attributes"]["POSITION"])
+        .collect();
+    assert_ne!(positions[0], positions[1], "no shared buffers either");
     let pbr = &doc["materials"][0]["pbrMetallicRoughness"];
     assert_eq!(pbr["metallicFactor"], 1.0);
     assert_eq!(pbr["roughnessFactor"], 0.4);

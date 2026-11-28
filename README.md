@@ -355,7 +355,7 @@ part's). A B-rep solid has no triangles and is left out under `skipped`.
 
 | Format | Units, axes | Structure | Materials |
 | --- | --- | --- | --- |
-| `glb` (glTF 2.0 binary) | metres, Y up (one root node: scale 0.001 and Z up to Y up) | a node per part, a group node per group of two or more parts; equal mesh and look share one mesh; `extras: {partId, material, thickness}` | PBR metallic-roughness per colour, metalness and roughness |
+| `glb` (glTF 2.0 binary) | metres, Y up (one root node: scale 0.001 and Z up to Y up) | a node per part, a group node per group of two or more parts; every part its own mesh and buffers, also equal parts (to animate each one); `extras: {partId, material, thickness}` | PBR metallic-roughness per colour, metalness and roughness |
 | `stl` (binary) | millimetres, Z up | every part in one triangle soup | none |
 | `obj` + `.mtl` | millimetres, Y up | `o` per part, named as the part in `lang` | `Kd`, `Ks`, `Ns`, `Pm`, `Pr` per look |
 

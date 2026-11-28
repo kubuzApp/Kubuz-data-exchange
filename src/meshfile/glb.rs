@@ -5,8 +5,9 @@
 //! - Under it a node per group (the template part) of two or more parts,
 //!   and under that a node per part with its name and `extras { partId,
 //!   material?, thickness? }`.
-//! - Parts with the same solid and look share one glTF mesh; a part that is
-//!   a mirror image or a scale gets its own baked mesh, because not every
+//! - Every part has its own glTF mesh and its own buffers, also parts that
+//!   are equal, so each one can be animated or edited on its own. A part
+//!   that is a mirror image or a scale gets its mesh baked, because not every
 //!   viewer turns the faces of a negative-determinant node round.
 //! - One `pbrMetallicRoughness` material per colour, metalness and
 //!   roughness. No textures, no compression.
@@ -165,8 +166,6 @@ fn is_identity(m: [P3; 3], t: P3) -> bool {
 
 pub fn write_glb(scene: &Scene, name: &str) -> Result<Vec<u8>, String> {
     let mut b = Builder::default();
-    let mut shared_geometry: HashMap<usize, Geometry> = HashMap::new();
-    let mut shared_mesh: HashMap<(usize, usize), usize> = HashMap::new();
 
     let materials: Vec<Value> = scene
         .materials
@@ -199,20 +198,13 @@ pub fn write_glb(scene: &Scene, name: &str) -> Result<Vec<u8>, String> {
     }
     for part in &scene.parts {
         let (mesh, matrix, position) = if part.is_rotation() {
-            let geometry = *shared_geometry.entry(part.mesh).or_insert_with(|| {
-                let m = &scene.meshes[part.mesh];
-                b.geometry(&m.positions, &m.normals, &m.triangles)
-            });
-            let key = (part.mesh, part.material);
-            let mesh = match shared_mesh.get(&key) {
-                Some(&i) => i,
-                None => {
-                    let i = b.mesh(&part.name, geometry, part.material);
-                    shared_mesh.insert(key, i);
-                    i
-                }
-            };
-            (mesh, part.matrix, part.position)
+            let m = &scene.meshes[part.mesh];
+            let geometry = b.geometry(&m.positions, &m.normals, &m.triangles);
+            (
+                b.mesh(&part.name, geometry, part.material),
+                part.matrix,
+                part.position,
+            )
         } else {
             let (p, n, t) = baked(&scene.meshes[part.mesh], part);
             let geometry = b.geometry(&p, &n, &t);
